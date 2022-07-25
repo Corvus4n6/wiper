@@ -1,0 +1,13 @@
+[mongo]
+host = 127.0.0.1
+port = 27017
+database = my.database
+collection = my.collection
+
+[smtp]
+enabled = 0
+server = smtp.example.com:587
+login = wiper@example.com
+password = smptpassword
+to = admin@example.com
+from = wiper@example.com
