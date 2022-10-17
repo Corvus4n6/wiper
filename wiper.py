@@ -636,7 +636,7 @@ def fulltest():
         mailbody += "Inventory No: " + str(inventory) + "\n"
     mailbody += "Model: " + str(drivedict['model']) + "\n"
     mailbody += "Serial: " + str(drivedict['serial']) + "\n"
-    mailbody += "SMART health check:" + str(drivedict['assessment']) + "\n"
+    mailbody += "SMART health check: " + str(drivedict['assessment']) + "\n"
     mailbody += "Device size: " + ('{:,}'.format(devsize)) + " bytes\n"
     mailbody += "Block size: " + str(blocksize) + "\n"
     ffwritespeed = ("%0.2f" % (devsize / ffwriteruntime / 1024 / 1024))
