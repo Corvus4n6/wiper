@@ -26,6 +26,8 @@ options:
                         add media inventory number to record
 ```
 
-Default wipe pattern is write 0xFF, read verify, write 0x00, read verify.
+Default 'full' wipe pattern is write 0xFF, read verify, write 0x00, read verify.
 
-The --smart option reads each block of data to determine if wiping is required or if the block is already forensically sterile and full of 0x00 or null-bytes. This option is intended for use with flash-based media such as SSDs where regular overwriting of blocks will shorten the media lifetime.
+The 'smart' option reads each block of data to determine if wiping is required or if the block is already forensically sterile and full of 0x00 or null-bytes. This option is intended for use with flash-based media such as SSDs where regular overwriting of blocks will shorten the media lifetime.
+
+This program was developed to be consistent with NIST SP 800-88 R1 Guidelines for Media Sanitization "Clear" method for attached storage where a single pass with a fixed data value to the target media is sufficient to render the original data unreadable, even under laboratory conditions. The 'smart' and 'zero' options will overwrite data with zeros or null (hex 0x00) values. The 'full' double-wipe and verification method is the default to confirm all sectors of the drive are writeable, readable, and do not have any 'stuck' bits.
