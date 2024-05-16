@@ -33,6 +33,7 @@ import smtplib
 # stats about number of bytes overwritten
 
 config = configparser.RawConfigParser()
+configured=False
 # TODO - compile this and move to /usr/local/sbin
 # TODO - add to BH but with the database option omitted?
 # compile with pyinstaller -F to make a standalone version
@@ -47,28 +48,33 @@ for loc in searcharray:
     try:
         with open(os.path.join(loc,'wiper.conf')) as source:
             config.read_file(source)
+            configured=True
     except IOError:
         pass
-
 #config.read('wiper.conf')
 
-# mongo databse config
-mongohost = config.get('mongo', 'host')
-mongoport = config.get('mongo', 'port')
-mongodatabase = config.get('mongo', 'database')
-mongocollection = config.get('mongo', 'collection')
-# mail server config
-mailactive = config.get('smtp', 'enabled')
-mailserver = config.get('smtp', 'server')
-maillogin = config.get('smtp', 'login')
-mailpassword = config.get('smtp', 'password')
-mailto = config.get('smtp', 'to')
-mailfrom = config.get('smtp', 'from')
+if configured:
+    # mongo databse config
+    mongohost = config.get('mongo', 'host')
+    mongoport = config.get('mongo', 'port')
+    mongodatabase = config.get('mongo', 'database')
+    mongocollection = config.get('mongo', 'collection')
+    # mail server config
+    mailactive = config.get('smtp', 'enabled')
+    mailserver = config.get('smtp', 'server')
+    maillogin = config.get('smtp', 'login')
+    mailpassword = config.get('smtp', 'password')
+    mailto = config.get('smtp', 'to')
+    mailfrom = config.get('smtp', 'from')
 
-from pymongo import MongoClient
-client = MongoClient(mongohost, int(mongoport))
-db = client[mongodatabase]
-collection = db[mongocollection]
+    from pymongo import MongoClient
+    client = MongoClient(mongohost, int(mongoport))
+    db = client[mongodatabase]
+    collection = db[mongocollection]
+else:
+    print("Configuration file wiper.conf not found.")
+    mailactive="0"
+    mongohost="0"
 
 global devsize
 global devpos
@@ -90,6 +96,7 @@ starttime = time.time()
 arghelpdesc = 'Health check, sterilization, verification, and logging for data storage devices.'
 parser = argparse.ArgumentParser(description=arghelpdesc)
 parser.add_argument("target", help="Path to block device", nargs=1)
+# TODO - if target not provided, list possible targets to wipe
 parser.add_argument("-f", "--full", help="Full double wipe and verify [default]", action="store_true")
 parser.add_argument("-s", "--smart", help="Perform smart wipe", action="store_true")
 parser.add_argument("-z", "--zero", help="Single pass of null bytes", action="store_true")
@@ -213,11 +220,11 @@ def checkblock():
         # todo - also guaranteed to be accurate with no math issues
         # bytescrc = crc16.crc16xmodem(bytesin)
         # testing - remove hashing functions when checking simple bstring comparison
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
-        avgspd = ("%0.2f" % (devpos / runtime / 1024 / 1024))
+        avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
             etasec = math.floor((devsize - devpos) / (devpos / runtime))
@@ -323,6 +330,7 @@ def healthcheck(passno):
     print("SMART health check: " + str(smart.assessment))
 
     # mountcheck! On some systems the response is_mounted does not appear to be there
+    # TODO - write more detailed mount check to include add'l types, lvm, dm...
     try:
         mountcheck = blk.get_disks({ 'name' : smart.name, 'is_mounted' : True })
         if mountcheck:
@@ -462,7 +470,7 @@ def drivemap():
             cleancount = cleancount + blocksize
         else:
             dirtycount = dirtycount + blocksize
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
@@ -499,14 +507,14 @@ def fulltest():
         #if devpos == devsize:
         #    print("\n")
         #    exit()
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
-        avgspd = ("%0.2f" % (devpos / runtime / 1024 / 1024))
+        avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
-            etasec = math.floor((devsize - devpos) / (devpos / runtime))
+            etasec = math.floor((devsize - devpos) / (devpos+blocksize / runtime))
             etatime = str(datetime.timedelta(seconds=etasec))
         else:
             etatime = "-:--:--"
@@ -535,11 +543,11 @@ def fulltest():
     starttime = time.time()
     for devpos in range(0, (devsize), blocksize):
         #print(devpos, devsize)
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
-        avgspd = ("%0.2f" % (devpos / runtime / 1024 / 1024))
+        avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
             etasec = math.floor((devsize - devpos) / (devpos / runtime))
@@ -564,11 +572,11 @@ def fulltest():
     starttime = time.time()
     for devpos in range(0, (devsize), blocksize):
         #print(xx, devsize)
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
-        avgspd = ("%0.2f" % (devpos / runtime / 1024 / 1024))
+        avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
             etasec = math.floor((devsize - devpos) / (devpos / runtime))
@@ -600,11 +608,11 @@ def fulltest():
     starttime = time.time()
     for devpos in range(0, (devsize), blocksize):
         #print(xx, devsize)
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
-        avgspd = ("%0.2f" % (devpos / runtime / 1024 / 1024))
+        avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
             etasec = math.floor((devsize - devpos) / (devpos / runtime))
@@ -653,7 +661,8 @@ def fulltest():
     averageread = ("%0.2f" % ((devsize*2) / (ffverifyruntime + zzverifyruntime) / 1024 / 1024))
     mailbody += "Average R/W speed: " + str(averageread) + " / " + str(averagewrite) + " MBps\n"
 
-    email_notify(mailactive, mailserver, maillogin, mailpassword, mailfrom, mailto, mailsubject, mailbody)
+    if mailactive != "0":
+        email_notify(mailactive, mailserver, maillogin, mailpassword, mailfrom, mailto, mailsubject, mailbody)
     return "verified", "Double wiped and fully verified."
 
 def singlepass():
@@ -666,11 +675,11 @@ def singlepass():
         #if devpos == devsize:
         #    print("\n")
         #    exit()
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
-        avgspd = ("%0.2f" % (devpos / runtime / 1024 / 1024))
+        avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
             etasec = math.floor((devsize - devpos) / (devpos / runtime))
@@ -700,11 +709,11 @@ def singlepass():
     os.lseek(block, 0, os.SEEK_SET)
     for devpos in range(0, (devsize), blocksize):
         #print(devpos, devsize)
-        percentdone = ("%6.3f" % ((devpos / devsize) * 100))
+        percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
         # calc average speed
-        avgspd = ("%0.2f" % (devpos / runtime / 1024 / 1024))
+        avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
             etasec = math.floor((devsize - devpos) / (devpos / runtime))
@@ -763,7 +772,7 @@ def dbcheck(client):
     try:
         serverinfo = client.server_info()
     except:
-        nodb = input("Databse unreachable. Continue? (y/n) ")
+        nodb = input("Database unreachable. Continue? (y/n) ")
         if nodb.lower() == "y":
             return False
         else:
@@ -771,9 +780,12 @@ def dbcheck(client):
     return True
 
 def dbupdate(collection, drivedict):
-    print("Updating database...")
-    collection.insert_one(drivedict)
-    return
+    if mongohost != "0":
+        print("Updating database...")
+        collection.insert_one(drivedict)
+        return
+    else:
+        return
 
 def email_notify(mailactive, mailserver, maillogin, mailpassword, mailfrom, mailto, mailsubject, mailbody):
     if mailactive != "1":
@@ -804,7 +816,14 @@ atexit.register(cleanup)
 # calling main functions here - need to do this with arguments eventually
 rootcheck()
 hidecursor()
-dblive = dbcheck(client)
+if mongohost != "0":
+    dblive = dbcheck(client)
+else:
+    nodb = input("Logging database unreachable or not configured. Continue? (y/n) ")
+    if nodb.lower() == "y":
+        dblive = False
+    else:
+        sys.exit(1)
 drivedict = healthcheck(1)
 # try to fix badly named keys
 try:
