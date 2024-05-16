@@ -449,6 +449,7 @@ def healthcheck(passno):
         pass
 
     #print(dir(smart.attributes))
+    # TODO - this breaks with pySMART v1.3.0
     for i in smart.attributes:
         if i:
             smartdict['attributes'][int(i.num)] = i.__dict__
