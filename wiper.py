@@ -515,7 +515,7 @@ def fulltest():
         avgspd = ("%0.2f" % ((devpos+blocksize) / runtime / 1024 / 1024))
         # calc time remaining
         if runtime > 0 and devpos > 0:
-            etasec = math.floor((devsize - devpos) / (devpos+blocksize) / runtime))
+            etasec = math.floor((devsize - devpos) / ((devpos+blocksize) / runtime))
             etatime = str(datetime.timedelta(seconds=etasec))
         else:
             etatime = "-:--:--"
