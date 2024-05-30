@@ -916,7 +916,7 @@ if inventory:
                 if setid.lower() == "y":
                     drivenotes = ""
                     if '_vendor' in drivedict.keys():
-                        drivenotes += 'Vendor: ' + drivedict['_vendor'] + '\n'
+                        drivenotes += 'Vendor: ' + str(drivedict['_vendor']) + '\n'
                     if 'model' in drivedict.keys():
                         drivenotes += 'Model: ' + drivedict['model'] + '\n'
                     if 'capacity' in drivedict.keys():
