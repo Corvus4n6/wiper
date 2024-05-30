@@ -17,7 +17,7 @@ import os, sys, argparse, time, datetime, math, re
 import json
 from blkinfo import BlkDiskInfo
 import configparser
-import smtplib
+import requests
 
 # pip3 install pySMART
 # apt install python3-pymongo
@@ -55,26 +55,40 @@ for loc in searcharray:
 
 if configured:
     # mongo databse config
-    mongohost = config.get('mongo', 'host')
-    mongoport = config.get('mongo', 'port')
-    mongodatabase = config.get('mongo', 'database')
-    mongocollection = config.get('mongo', 'collection')
+    if config.get('mongo', 'enabled') == "1":
+        mongohost = config.get('mongo', 'host')
+        mongoport = config.get('mongo', 'port')
+        mongodatabase = config.get('mongo', 'database')
+        mongocollection = config.get('mongo', 'collection')
+        from pymongo import MongoClient
+        client = MongoClient(mongohost, int(mongoport))
+        db = client[mongodatabase]
+        collection = db[mongocollection]
+    else:
+        mongohost="0"
     # mail server config
-    mailactive = config.get('smtp', 'enabled')
-    mailserver = config.get('smtp', 'server')
-    maillogin = config.get('smtp', 'login')
-    mailpassword = config.get('smtp', 'password')
-    mailto = config.get('smtp', 'to')
-    mailfrom = config.get('smtp', 'from')
+    if config.get('smtp', 'enabled') == "1":
+        mailserver = config.get('smtp', 'server')
+        maillogin = config.get('smtp', 'login')
+        mailpassword = config.get('smtp', 'password')
+        mailto = config.get('smtp', 'to')
+        mailfrom = config.get('smtp', 'from')
+        import smtplib
+    else:
+        mailactive="0"
+    # asset management API config
+    if config.get('amapi', 'enabled') == "1":
+        assman = config.get('amapi', 'enabled')
+        asssvr = config.get('amapi', 'server')
+        asstok = config.get('amapi', 'token')
+    else:
+        assman="0"
 
-    from pymongo import MongoClient
-    client = MongoClient(mongohost, int(mongoport))
-    db = client[mongodatabase]
-    collection = db[mongocollection]
 else:
     print("Configuration file wiper.conf not found.")
     mailactive="0"
     mongohost="0"
+    assman="0"
 
 global devsize
 global devpos
@@ -811,6 +825,47 @@ def cleanup():
     # things we need to do on exit
     showcursor()
 
+# TODO - consolidate API functions for asset management
+def insertass(assdata):
+    # update asset management system - add maintainence record at end
+    assreq = asssvr + 'hardware'
+    asshed = { 'Authorization' : 'Bearer ' + asstok , 'accept' : 'application/json', 'content-type' : 'application/json' }
+    response = requests.post(assreq, headers=asshed, json=assdata)
+    if response.status_code == 200:
+        pass
+    elif response.status_code == 404:
+        sys.exit('Error: Asset server endpoint ' + asssvr + ' not found. ' + response.text )
+    elif response.status_code == 401:
+        sys.exit('Error: Asset server authorization failed. Check your API token. ' + response.text )
+    else:
+        sys.exit('Unexpected response from API: ' + str(response.status_code) + ' ' + response.text )
+    respdict = response.json()
+    if 'status' in respdict.keys():
+        if respdict['status'] == 'error':
+            sys.exit('Asset server error: ' + json.dumps(respdict['messages']))
+    print("Asset management skeleton record inserted. Please review.")
+    return respdict['payload']['id'] #int
+
+def assupdate(assdata):
+    # update asset management system - add maintainence record at end
+    assreq = asssvr + 'maintenances'
+    asshed = { 'Authorization' : 'Bearer ' + asstok , 'accept' : 'application/json', 'content-type' : 'application/json' }
+    response = requests.post(assreq, headers=asshed, json=assdata)
+    if response.status_code == 200:
+        pass
+    elif response.status_code == 404:
+        sys.exit('Error: Asset server endpoint ' + asssvr + ' not found. ' + response.text )
+    elif response.status_code == 401:
+        sys.exit('Error: Asset server authorization failed. Check your API token. ' + response.text )
+    else:
+        sys.exit('Unexpected response from API: ' + str(response.status_code) + ' ' + response.text )
+    respdict = response.json()
+    if 'status' in respdict.keys():
+        if respdict['status'] == 'error':
+            sys.exit('Asset server error: ' + json.dumps(respdict['messages']))
+    print("Asset management records updated.")
+    return
+
 import atexit
 atexit.register(cleanup)
 
@@ -836,14 +891,121 @@ drivedict['timestamp'] = int(time.time())
 drivedict['wipestate'] = "precheck"
 if inventory:
     drivedict['inventory'] = inventory
-#import pprint
-#pprint.pprint(drivedict)
+
+    # check asset management
+    if assman == "1":
+        # try to connect and get information about the drive from asset management
+        # lookup by asset tag
+        assreq = asssvr + 'hardware/bytag/' + inventory + '/?deleted=false'
+        asshed = { 'Authorization' : 'Bearer ' + asstok , 'accept' : 'application/json' }
+        response = requests.get(assreq, headers=asshed)
+        if response.status_code == 200:
+            pass
+        elif response.status_code == 404:
+            sys.exit('Error: Asset server endpoint ' + asssvr + ' not found. ' + response.text )
+        elif response.status_code == 401:
+            sys.exit('Error: Asset server authorization failed. Check your API token. ' + response.text )
+        else:
+            sys.exit('Unexpected response from API: ' + str(response.status_code) + ' ' + response.text )
+        respdict = response.json()
+
+        if 'status' in respdict.keys():
+            if respdict['status'] == 'error' and respdict['messages'] == 'Asset does not exist.':
+                # ask if they want to create an asset with this inventory number
+                setid = input("Device with inventory number " + inventory + " not found in asset management.\nCreate a new record for this device? (y/n/q) ")
+                if setid.lower() == "y":
+                    drivenotes = ""
+                    if '_vendor' in drivedict.keys():
+                        drivenotes += 'Vendor: ' + drivedict['_vendor'] + '\n'
+                    if 'model' in drivedict.keys():
+                        drivenotes += 'Model: ' + drivedict['model'] + '\n'
+                    if 'capacity' in drivedict.keys():
+                        drivenotes += 'Capacity: ' + str(drivedict['capacity'])
+                    if '_capacity_human' in drivedict.keys():
+                        drivenotes += ' (' + drivedict['_capacity_human'] + ')'
+                    else:
+                        drivenotes += ''
+                    assdata = { 'asset_tag' : inventory, 'status_id' : 1, 'model_id' : 32, 'serial' : drivedict['serial'], 'notes' : drivenotes }
+                    # insert record and get id
+                    assid = insertass(assdata)
+
+                elif setid.lower() == 'n':
+                    pass
+                else:
+                    # a non yes or no answer will quit
+                    sys.exit("Exiting.")
+
+        elif 'id' in respdict.keys():
+            assid = respdict['id'] # integer
+
+        elif respdict['status'] == 'error':
+            sys.exit('Asset server error: ' + json.dumps(respdict['messages']))
+else:
+    # if inventory is not specified - check by serial number just in case
+    if assman == "1":
+        assreq = asssvr + 'hardware/byserial/' + drivedict['serial'] + '/?deleted=false'
+        asshed = { 'Authorization' : 'Bearer ' + asstok , 'accept' : 'application/json' }
+        response = requests.get(assreq, headers=asshed)
+        if response.status_code == 200:
+            pass
+        elif response.status_code == 404:
+            sys.exit('Error: Asset server endpoint ' + asssvr + ' not found. ' + response.text )
+        elif response.status_code == 401:
+            sys.exit('Error: Asset server authorization failed. Check your API token. ' + response.text )
+        else:
+            sys.exit('Unexpected response from API: ' + str(response.status_code) + ' ' + response.text )
+
+        respdict = response.json()
+        # this may return multiple rows from the database
+
+        if 'status' in respdict.keys():
+            if respdict['status'] == 'error' and respdict['messages'] == 'Asset does not exist.':
+                # ask if they want to create an asset? no. specify -i instead
+                pass # its fine.
+
+        if 'total' in respdict.keys():
+            if respdict['total'] == 1:
+                # only 1 row - makes things easy
+                foundid = respdict['rows'][0]['id']
+                foundinv = respdict['rows'][0]['asset_tag']
+                setid = input("Drive with matching serial number " + drivedict['serial'] + " found in asset management with inventory number " + foundinv + ".\nUse this inventory number? (y/n/q) ")
+                if setid.lower() == "y":
+                    assid = foundid
+                    inventory = foundinv
+                    drivedict['inventory'] = inventory
+                elif setid.lower() == 'n':
+                    pass
+                else:
+                    # a non yes or no answer will quit
+                    sys.exit("Exiting.")
+            elif respdict['total'] > 1:
+                # multiple entries - which should not happen.
+                print('Multiple records with the same serial number are in the database:')
+                tmpdic = {} # quick cheater map
+                for row in respdict['rows']:
+                    tmpdic[str(row['id'])] = row['asset_tag']
+                    print('ID: ' + str(row['id'])  + '\tINV: ' + row['asset_tag'] + '\tSerial: ' + row['serial'])
+                getinv = input("Please enter the record ID number to associate with this device or leave blank to ignore: ")
+                if getinv != "":
+                    assid=int(getinv.strip())
+                    inventory=tmpdic[getinv.strip()]
+                else:
+                    inventory = False
+                    assman = "0"
+
+        #if 'status' in respdict.keys():
+        #    if respdict['status'] == 'error':
+        #        sys.exit('Asset server error: ' + json.dumps(respdict['messages']))
+        # get the asset database id for later use and updating records
+
 if dblive:
     dbupdate(collection, drivedict)
 wipestate = '' # clean, dirty, verified, error
 wipenotes = ''
 #TODO: Feed this program some very problematic drives for testing.
 #wipestate, wipenotes = checkblock() # check, write 00 if not nulled - intended for flash/ssd/nvme
+
+start_date = datetime.date.today()
 
 if args.check:
     wipestate, wipenotes = drivemap()
@@ -875,4 +1037,11 @@ if dblive:
     dbupdate(collection, drivedict)
 showcursor()
 # TODO notify() # that wipe is completed and state of process
-sys.exit(0)
+
+# update asset management if applicable
+if assman != "0" and inventory:
+    completion_date = datetime.date.today()
+    maintnotes = wipenotes
+    maintnotes += "\nSMART Check: " + drivedict['assessment']
+    assdata = { 'asset_id' : assid, 'supplier_id' : 3, 'start_date' : str(start_date), 'completion_date' : str(completion_date), 'asset_maintenance_type' : 'Maintainance', 'title' : wipestate.capitalize() , 'notes' : maintnotes }
+    assupdate(assdata)
