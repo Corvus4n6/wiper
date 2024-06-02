@@ -40,10 +40,10 @@ configured=False
 
 # build a search array where local config will override the more global
 searcharray = []
-searcharray.append("/etc/")
-searcharray.append("/usr/local/etc/")
-searcharray.append(os.path.expanduser("~"))
 searcharray.append(os.curdir)
+searcharray.append(os.path.expanduser("~"))
+searcharray.append("/usr/local/etc/")
+searcharray.append("/etc/")
 for loc in searcharray:
     try:
         with open(os.path.join(loc,'wiper.conf')) as source:
