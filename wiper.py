@@ -68,6 +68,7 @@ if configured:
         mongohost="0"
     # mail server config
     if config.get('smtp', 'enabled') == "1":
+        mailactive="1"
         mailserver = config.get('smtp', 'server')
         maillogin = config.get('smtp', 'login')
         mailpassword = config.get('smtp', 'password')
