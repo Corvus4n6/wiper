@@ -22,5 +22,5 @@ token = XxXxXxXxX
 enabled = 0
 endpoint = "https://127.0.0.1/api/v1/"
 authorization = ""
-headers = ""
+headers = "{}"
 method = "POST"
