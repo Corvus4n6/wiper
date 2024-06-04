@@ -17,3 +17,10 @@ from = wiper@example.com
 enabled = 0
 server = https://127.0.0.1/api/v1/
 token = XxXxXxXxX
+
+[chatapi]
+enabled = 0
+endpoint = "https://127.0.0.1/api/v1/"
+authorization = ""
+headers = ""
+method = "POST"
