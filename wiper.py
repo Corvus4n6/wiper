@@ -18,6 +18,7 @@ import json
 from blkinfo import BlkDiskInfo
 import configparser
 import requests
+import urllib.parse
 
 # pip3 install pySMART
 # apt install python3-pymongo
@@ -84,6 +85,16 @@ if configured:
         asstok = config.get('amapi', 'token')
     else:
         assman="0"
+
+    # chat SPI for notifications
+    if config.get('chatapi', 'enabled') == "1":
+        chatty = config.get('chatapi', 'enabled')
+        chatendp = config.get('chatapi', 'endpoint')
+        chatauth = config.get('chatapi', 'authorization')
+        chathead = config.get('chatapi', 'headers')
+        chatmeth = config.get('chatapi', 'method')
+    else:
+        chatty="0"
 
 else:
     print("Configuration file wiper.conf not found.")
@@ -867,6 +878,18 @@ def assupdate(assdata):
     print("Asset management records updated.")
     return
 
+def chatnotify(message):
+    # internal corvus spreed server - I expect you will need to adjust to suit your needs to send notifications
+    print("Notifying via chat.")
+    chathed = json.loads(chathead)
+    messageenc = urllib.parse.quote(message)
+    chatreq = chatendp + messageenc
+    if chatmeth == "POST":
+        response = requests.post(chatreq, headers=chathed)
+    elif chatmeth == "GET":
+        response = requests.get(chatreq, headers=chathed)
+    return
+
 import atexit
 atexit.register(cleanup)
 
@@ -1046,3 +1069,23 @@ if assman != "0" and inventory:
     maintnotes += "\nSMART Check: " + drivedict['assessment']
     assdata = { 'asset_id' : assid, 'supplier_id' : 3, 'start_date' : str(start_date), 'completion_date' : str(completion_date), 'asset_maintenance_type' : 'Maintainance', 'title' : wipestate.capitalize() , 'notes' : maintnotes }
     assupdate(assdata)
+
+if chatty != "0":
+    # notify via chat channel api that the drive is done
+    message = "Media Sanitization Notification:"
+    if inventory:
+        message += "\nInventory: " + inventory
+    if '_vendor' in drivedict:
+        message += "\nVendor: " + str(drivedict['_vendor'])
+    if 'model' in drivedict:
+        message += "\nModel: " + str(drivedict['model'])
+    if 'family' in drivedict:
+        message += "\nFamily: " + str(drivedict['family'])
+    if 'capacity' in drivedict:
+        message += "\nSize: " + str(drivedict['capacity'])
+    if '_capacity_human' in drivedict:
+        message += " (" + str(drivedict['_capacity_human']) + ")"
+    message += "\nState: " + wipestate.capitalize()
+    message += "\n" + wipenotes
+    message += "\nSMART Check: " + drivedict['assessment']
+    chatnotify(message)
