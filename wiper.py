@@ -101,6 +101,7 @@ else:
     mailactive="0"
     mongohost="0"
     assman="0"
+    chatty="0"
 
 global devsize
 global devpos
