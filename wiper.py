@@ -101,7 +101,6 @@ else:
     mailactive="0"
     mongohost="0"
     assman="0"
-    chatty="0"
 
 global devsize
 global devpos
@@ -1067,7 +1066,7 @@ showcursor()
 if assman != "0" and inventory:
     completion_date = datetime.date.today()
     maintnotes = wipenotes
-    maintnotes += "\nSMART Check: " + drivedict['assessment']
+    maintnotes += "\nSMART Check: " + str(drivedict['assessment'])
     assdata = { 'asset_id' : assid, 'supplier_id' : 3, 'start_date' : str(start_date), 'completion_date' : str(completion_date), 'asset_maintenance_type' : 'Maintainance', 'title' : wipestate.capitalize() , 'notes' : maintnotes }
     assupdate(assdata)
 
@@ -1088,5 +1087,5 @@ if chatty != "0":
         message += " (" + str(drivedict['_capacity_human']) + ")"
     message += "\nState: " + wipestate.capitalize()
     message += "\n" + wipenotes
-    message += "\nSMART Check: " + drivedict['assessment']
+    message += "\nSMART Check: " + str(drivedict['assessment'])
     chatnotify(message)
