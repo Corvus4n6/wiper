@@ -129,7 +129,7 @@ parser.add_argument("-s", "--smart", help="Perform smart wipe", action="store_tr
 parser.add_argument("-z", "--zero", help="Single pass of null bytes", action="store_true")
 parser.add_argument("-c", "--check", help="verify media contains only nulls", action="store_true")
 parser.add_argument("-i", "--inventory", help="add media inventory number to record")
-parser.add_argument("--atasecure", help="Attempt ATA Secure Erase [DEV]", action="store_true")
+parser.add_argument("--atasecure", help="Perform ATA Secure Erase", action="store_true")
 args = parser.parse_args()
 # print(args.fname[0])
 devname = os.path.abspath(args.target[0])
