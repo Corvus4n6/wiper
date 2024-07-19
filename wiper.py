@@ -568,9 +568,8 @@ def atasecure():
     disablesec = command_line(['hdparm', '--user-master', 'user', '--security-disable', 'pass', devname]).decode()
     disablepass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'NULL', devname]).decode()
     print("ATA Secure Erase completed.")
-    # TODO - re-check drive settings?
-    # ideally, this should be verified afterwards
-    return "clean", "ATA Secure Erase Completed"
+    # we can't call this 'clean' or 'clear' because it may not be zeroes
+    return "erased", "ATA Secure Erase Completed"
 
 def fulltest():
     # this will run the media through a full wipe and verify test FF,verify,00,verify - designed for full drive
