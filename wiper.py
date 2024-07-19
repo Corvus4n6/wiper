@@ -19,6 +19,7 @@ from blkinfo import BlkDiskInfo
 import configparser
 import requests
 import urllib.parse
+import subprocess
 
 # pip3 install pySMART
 # apt install python3-pymongo
@@ -128,6 +129,7 @@ parser.add_argument("-s", "--smart", help="Perform smart wipe", action="store_tr
 parser.add_argument("-z", "--zero", help="Single pass of null bytes", action="store_true")
 parser.add_argument("-c", "--check", help="verify media contains only nulls", action="store_true")
 parser.add_argument("-i", "--inventory", help="add media inventory number to record")
+parser.add_argument("--atasecure", help="Attempt ATA Secure Erase [DEV]", action="store_true")
 args = parser.parse_args()
 # print(args.fname[0])
 devname = os.path.abspath(args.target[0])
@@ -522,6 +524,53 @@ def drivemap():
     else:
         print(trmred + "Drive is not sterile." + trmnorm)
         return "dirty","Drive mapped. Drive is dirty and contains non-nulled data. " + cleanpct + "% clean and " + dirtypct + "% dirty."
+
+def command_line(cmd, cmdtimeout=None):
+    try:
+        s = subprocess.run(cmd, capture_output=True, timeout=cmdtimeout)
+        s = s.stdout
+        return s.strip()
+    except subprocess.CalledProcessError:
+        return b''
+    except subprocess.TimeoutExpired:
+        return b'Timeout'
+
+def atasecure():
+    # call hdparm and ATA Secure-Erase the drive
+    '''
+    hdparm -I <device>
+    hdparm --user-master user --security-set-pass pass <device>
+    hdparm --user-master user --security-erase-enhanced pass <device>
+     - or if enhanced is not supported -
+    hdparm --user-master user --security-erase pass <device>
+     - afterwards, remove passwords from drive -
+    hdparm --user-master user --security-disable pass <device>
+    hdparm --user-master user --security-set-pass NULL <device>
+    '''
+    hdpcheck = command_line(['which','hdparm'])
+    if hdpcheck == b'':
+        sys.exit("ERROR: hdparm utility not found. Exiting.")
+    # get current drive status
+    hdpi = command_line(['hdparm','-I', devname]).decode()
+    if not re.search('supported: enhanced erase', hdpi):
+        sys.exit("ERROR: ATA Secure Erase not supported for this device. Exiting.")
+    ## TODO - confirm entry for "ordinary" erase in hdparm
+    if not re.search('(not\tfrozen)', hdpi):
+        sys.exit("ERROR: Drive is currently frozen. Exiting.")
+    if not re.search('(not\tlocked)', hdpi):
+        sys.exit("ERROR: Drive is currently locked. Exiting.")
+    # get time to secure-erase drive
+    setime = re.search('([0-9+]min for ENHANCED SECURITY ERASE)', hdpi).group(1)
+    print('Drive reports ' + setime)
+    # enable security
+    setpass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname]).decode()
+    seterase = command_line(['hdparm', '--user-master', 'user', '--security-erase-enhanced', 'pass', devname]).decode()
+    disablesec = command_line(['hdparm', '--user-master', 'user', '--security-disable', 'pass', devname]).decode()
+    disablepass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'NULL', devname]).decode()
+    print("ATA Secure Erase completed.")
+    # TODO - re-check drive settings?
+    # ideally, this should be verified afterwards
+    return "clean", "ATA Secure Erase Completed"
 
 def fulltest():
     # this will run the media through a full wipe and verify test FF,verify,00,verify - designed for full drive
@@ -1039,6 +1088,8 @@ elif args.zero:
     wipestate, wipenotes = singlepass()
 elif args.full:
     wipestate, wipenotes = fulltest()
+elif args.atasecure:
+    wipestate, wipenotes = atasecure()
 else:
     wipestate, wipenotes = fulltest()
 
