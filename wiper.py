@@ -107,7 +107,7 @@ global devsize
 global devpos
 global nullbytes
 global onesbytes
-global blocksize
+global blocksize, origblocksize
 
 starttime = time.time()
 
@@ -162,8 +162,8 @@ print('O.W.L. - Optimized Wipe and Logging - Forensic Media Sterilization Utilit
 print("Device:", devname)
 # devstat = os.stat(devname)
 
-# direct access to disk to bypass cache
-block = os.open(devname, os.O_RDWR)
+# direct access to disk to bypass cache, sync writes
+block = os.open(devname, os.O_RDWR|os.O_SYNC)
 # figure out the total size of the target
 devsize = os.lseek(block, 0, os.SEEK_END)
 # seek back to the beginning
@@ -171,50 +171,11 @@ devpos = os.lseek(block, 0, os.SEEK_SET)
 # print("Position:", devpos)
 print("Device size:", ('{:,}'.format(devsize)), "bytes")
 
-# calculate the optimal blocksize here via modulus
-blockcheck = 1
-# starting at the preferred optimal maximum
-blocksize = 4096 * 64
-decrementval = 4096
-while blockcheck != 0:
-    blockcheck = devsize % blocksize
-    #print("blocksize: ", blocksize, "blockcheck: ", blockcheck)
-    if blockcheck == 0:
-        break
-    # add a check in case we are dealing with older drives or odd number
-    if blocksize == decrementval:
-        decrementval = 512
-    blocksize -= decrementval
-    if blocksize == 0:
-        # if we can't calculate a reasonable block size set the default:
-        blocksize = 512
-        break
-    # odd problem to note here - if the last block is smaller than the
-    # blocksize variable, then it will flag as 'dirty'
+# set blocksize to 1MB = 4096*256
+blocksize = 4096 * 256
+origblocksize = blocksize
 
-if blocksize == 512:
-    # try to find a bigger divisor on this oddly sized drive
-    blockcheck = 1
-    # starting at the preferred optimal maximum
-    blocksize = 4096 * 64
-    decrementval = 512
-    while blockcheck != 0:
-        blockcheck = devsize % blocksize
-        #print("blocksize: ", blocksize, "blockcheck: ", blockcheck)
-        if blockcheck == 0:
-            break
-        # add a check in case we are dealing with older drives or odd number
-        if blocksize == decrementval:
-            decrementval = 512
-        blocksize -= decrementval
-        if blocksize == 0:
-            # if we can't calculate a reasonable block size set the default:
-            blocksize = 512
-            break
-        # odd problem to note here - if the last block is smaller than the
-        # blocksize variable, then it will flag as 'dirty'
-
-print("Block size set to", blocksize, " bytes")
+print("Block size set to", ('{:,}'.format(blocksize)), "bytes")
 #sys.exit(0)
 # define null4k block
 nullbytes = bytes(blocksize)
@@ -232,6 +193,10 @@ onesbytes = nullbytes.replace(b'\x00', b'\xff')
 
 def checkblock():
     # ideal for flash media where we want to limit writes
+    # override blocksize to be nice to flash media - assume 4k native
+    blocksize = 4096
+    nullbytes = bytes(blocksize)
+    print("Block size changed to", ('{:,}'.format(blocksize)), "bytes")
     flushcaches()
     os.lseek(block, 0, os.SEEK_SET)
     # loop this whole process
@@ -488,12 +453,16 @@ def healthcheck(passno):
 
 def drivemap():
     # quick mapping of the data on the drive for stats
+    global blocksize
     cleancount = 0
     dirtycount = 0
     os.lseek(block, 0, os.SEEK_SET)
     flushcaches()
     starttime = time.time() # reset the clock
     for devpos in range(0, (devsize), blocksize):
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
         bytesin = os.read(block,blocksize)
         if bytesin == nullbytes:
             cleancount = cleancount + blocksize
@@ -572,12 +541,16 @@ def atasecure():
     return "erased", "ATA Secure Erase Completed"
 
 def fulltest():
+    global blocksize
     # this will run the media through a full wipe and verify test FF,verify,00,verify - designed for full drive
     # testing or first-time wipe and verify of new media or hunting for stuck bits
     #devsize = 1073741824 # DEBUG override 1GB
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time() # reset the clock
     for devpos in range(0, (devsize), blocksize):
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
         #print(devpos, devsize)
         #if devpos == devsize:
         #    print("\n")
@@ -615,8 +588,12 @@ def fulltest():
     flushcaches()
     # Then read back every block and verify - if there are any mismatches, die.
     os.lseek(block, 0, os.SEEK_SET)
+    blocksize = origblocksize
     starttime = time.time()
     for devpos in range(0, (devsize), blocksize):
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
         #print(devpos, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
@@ -644,8 +621,12 @@ def fulltest():
     print()
     # Now repeat for x00 across the whole drive
     os.lseek(block, 0, os.SEEK_SET)
+    blocksize = origblocksize
     starttime = time.time()
     for devpos in range(0, (devsize), blocksize):
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
         #print(xx, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
@@ -681,7 +662,11 @@ def fulltest():
     # Then read back every block and verify - if there are any mismatches, die.
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time()
+    blocksize = origblocksize
     for devpos in range(0, (devsize), blocksize):
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
         #print(xx, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
@@ -741,11 +726,15 @@ def fulltest():
     return "verified", "Double wiped and fully verified."
 
 def singlepass():
+    global blocksize
     # this will run the media through a full wipe and verify test FF,verify,00,verify - designed for full drive
     # testing or first-time wipe and verify of new media or hunting for stuck bits
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time() # reset the clock
     for devpos in range(0, (devsize), blocksize):
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
         #print(devpos, devsize)
         #if devpos == devsize:
         #    print("\n")
@@ -763,7 +752,11 @@ def singlepass():
             etatime = "-:--:--"
 
         #writing zeroes
+        #wrtstart = time.time()
         os.write(block, nullbytes)
+        #wrtend = time.time()
+        #realspd = ("%0.2f" % ((blocksize/1024/1024) / ( wrtend-wrtstart)))
+        # the time of this syncd write could give us real-time write speed
         # sync can wait for the end
         #os.sync()
         status = "Writing 0x00: " + ('{:,}'.format(devpos+blocksize)) + " (" + percentdone + "%)  State: " + trmred + "00 " + \
@@ -782,7 +775,12 @@ def singlepass():
     # flush the cache
     flushcaches()
     os.lseek(block, 0, os.SEEK_SET)
+    blocksize = origblocksize # reset
+    starttime = time.time() # reset the clock
     for devpos in range(0, (devsize), blocksize):
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
         #print(devpos, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
