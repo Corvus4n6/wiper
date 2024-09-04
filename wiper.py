@@ -129,6 +129,7 @@ parser.add_argument("-s", "--smart", help="Perform smart wipe", action="store_tr
 parser.add_argument("-z", "--zero", help="Single pass of null bytes", action="store_true")
 parser.add_argument("-c", "--check", help="verify media contains only nulls", action="store_true")
 parser.add_argument("-i", "--inventory", help="add media inventory number to record")
+parser.add_argument("--ataerase", help="Perform ATA Erase", action="store_true")
 parser.add_argument("--atasecure", help="Perform ATA Secure Erase", action="store_true")
 args = parser.parse_args()
 # print(args.fname[0])
@@ -201,6 +202,7 @@ def checkblock():
     os.lseek(block, 0, os.SEEK_SET)
     # loop this whole process
     starttime = time.time() # reset the clock
+    blockwrites = 0
     for xx in range(0, (devsize), blocksize):
         # seek 4k from current position - loop this part while less than devsize
         devpos = os.lseek(block, 0, os.SEEK_CUR)
@@ -239,6 +241,7 @@ def checkblock():
             # print("Position:", devpos)
             # write 4k nulls and sync
             os.write(block, nullbytes)
+            blockwrites += 1
             ##os.sync()
             # back up 4k and recheck
             ##devpos = os.lseek(block, -4096, os.SEEK_CUR)
@@ -247,7 +250,7 @@ def checkblock():
             #bytescrc = crc16.crc16xmodem(bytesin)
             # calculate percentage complete
             status = "Position: " + ('{:,}'.format(devpos+blocksize)) + " (" + percentdone + "%)  State: " + trmred + "X " + \
-                     trmnorm + " TTC: " + etatime + " @ " + avgspd + " MBps  \r"
+                     trmnorm + " TTC: " + etatime + " @ " + avgspd + " MBps ("+ str(blockwrites) +" blocks written)  \r"
             sys.stdout.write(status)
             ##if bytesin != nullbytes:
                 # this write failed - throw an error and stop
@@ -262,7 +265,7 @@ def checkblock():
     runtimesec = math.floor(runtime)
     runtimefmt = str(datetime.timedelta(seconds=runtimesec))
     status = "Checked: " + ('{:,}'.format(devpos+blocksize)) + " (" + percentdone + "%)  State: " + trmgrn + "- " + \
-                    trmnorm + " RT: " + runtimefmt + " @ " + avgspd + " MBps   \r"
+                    trmnorm + " RT: " + runtimefmt + " @ " + avgspd + " MBps ("+ str(blockwrites) +" blocks written)  \r"
     return "clean", "Single pass overwriting non-clean sectors with nulls. Not verified."
 
 def flushcaches():
@@ -492,7 +495,7 @@ def drivemap():
         return "clean","Drive mapped. Drive is sterile and only contains 0x00."
     else:
         print(trmred + "Drive is not sterile." + trmnorm)
-        return "dirty","Drive mapped. Drive is dirty and contains non-nulled data. " + cleanpct + "% clean and " + dirtypct + "% dirty."
+        return "dirty","Drive mapped. Drive is dirty and contains non-nulled data. " + cleanpct + "% clean and " + dirtypct + "% dirty (" + str(dirtycount) + " blocks)."
 
 def command_line(cmd, cmdtimeout=None):
     try:
@@ -539,6 +542,32 @@ def atasecure():
     print("ATA Secure Erase completed.")
     # we can't call this 'clean' or 'clear' because it may not be zeroes
     return "erased", "ATA Secure Erase Completed"
+
+def ataerase():
+    # call hdparm and ATA Erase (null) the drive
+    hdpcheck = command_line(['which','hdparm'])
+    if hdpcheck == b'':
+        sys.exit("ERROR: hdparm utility not found. Exiting.")
+    # get current drive status
+    hdpi = command_line(['hdparm','-I', devname]).decode()
+    if not re.search('supported: enhanced erase', hdpi):
+        sys.exit("ERROR: ATA Secure Erase not supported for this device. Exiting.")
+    ## TODO - confirm entry for "ordinary" erase in hdparm
+    if not re.search('(not\tfrozen)', hdpi):
+        sys.exit("ERROR: Drive is currently frozen. Exiting.")
+    if not re.search('(not\tlocked)', hdpi):
+        sys.exit("ERROR: Drive is currently locked. Exiting.")
+    # get time to secure-erase drive
+    setime = re.search('([0-9+]min for ENHANCED SECURITY ERASE)', hdpi).group(1)
+    print('Drive reports ' + setime)
+    # enable security
+    setpass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname]).decode()
+    seterase = command_line(['hdparm', '--user-master', 'user', '--security-erase', 'pass', devname]).decode()
+    disablesec = command_line(['hdparm', '--user-master', 'user', '--security-disable', 'pass', devname]).decode()
+    disablepass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'NULL', devname]).decode()
+    print("ATA Secure Erase completed.")
+    # we can't call this 'clean' or 'clear' because it may not be zeroes
+    return "erased", "ATA Erase Completed"
 
 def fulltest():
     global blocksize
@@ -1087,6 +1116,8 @@ elif args.full:
     wipestate, wipenotes = fulltest()
 elif args.atasecure:
     wipestate, wipenotes = atasecure()
+elif args.ataerase:
+    wipestate, wipenotes = ataerase()
 else:
     wipestate, wipenotes = fulltest()
 
