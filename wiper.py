@@ -532,7 +532,7 @@ def atasecure():
     if not re.search('(not\tlocked)', hdpi):
         sys.exit("ERROR: Drive is currently locked. Exiting.")
     # get time to secure-erase drive
-    setime = re.search('([0-9+]min for ENHANCED SECURITY ERASE)', hdpi).group(1)
+    setime = re.search('([0-9]+min for ENHANCED SECURITY ERASE)', hdpi).group(1)
     print('Drive reports ' + setime)
     # enable security
     setpass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname]).decode()
@@ -558,7 +558,7 @@ def ataerase():
     if not re.search('(not\tlocked)', hdpi):
         sys.exit("ERROR: Drive is currently locked. Exiting.")
     # get time to secure-erase drive
-    setime = re.search('([0-9+]min for ENHANCED SECURITY ERASE)', hdpi).group(1)
+    setime = re.search('([0-9]+min for ENHANCED SECURITY ERASE)', hdpi).group(1)
     print('Drive reports ' + setime)
     # enable security
     setpass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname]).decode()
