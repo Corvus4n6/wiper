@@ -545,6 +545,7 @@ def atasecure():
 
 def ataerase():
     # call hdparm and ATA Erase (null) the drive
+    # TODO switch to sg_sanitize and similar commands?
     hdpcheck = command_line(['which','hdparm'])
     if hdpcheck == b'':
         sys.exit("ERROR: hdparm utility not found. Exiting.")
@@ -558,7 +559,7 @@ def ataerase():
     if not re.search('(not\tlocked)', hdpi):
         sys.exit("ERROR: Drive is currently locked. Exiting.")
     # get time to secure-erase drive
-    setime = re.search('([0-9]+min for ENHANCED SECURITY ERASE)', hdpi).group(1)
+    setime = re.search('([0-9]+min for SECURITY ERASE)', hdpi).group(1)
     print('Drive reports ' + setime)
     # enable security
     setpass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname]).decode()
