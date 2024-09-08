@@ -537,8 +537,8 @@ def atasecure():
     # enable security
     setpass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname]).decode()
     seterase = command_line(['hdparm', '--user-master', 'user', '--security-erase-enhanced', 'pass', devname]).decode()
-    disablesec = command_line(['hdparm', '--user-master', 'user', '--security-disable', 'pass', devname]).decode()
     disablepass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'NULL', devname]).decode()
+    disablesec = command_line(['hdparm', '--user-master', 'user', '--security-disable', 'NULL', devname]).decode()
     print("ATA Secure Erase completed.")
     # we can't call this 'clean' or 'clear' because it may not be zeroes
     return "erased", "ATA Secure Erase Completed"
@@ -564,8 +564,8 @@ def ataerase():
     # enable security
     setpass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname]).decode()
     seterase = command_line(['hdparm', '--user-master', 'user', '--security-erase', 'pass', devname]).decode()
-    disablesec = command_line(['hdparm', '--user-master', 'user', '--security-disable', 'pass', devname]).decode()
     disablepass = command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'NULL', devname]).decode()
+    disablesec = command_line(['hdparm', '--user-master', 'user', '--security-disable', 'NULL', devname]).decode()
     print("ATA Secure Erase completed.")
     # we can't call this 'clean' or 'clear' because it may not be zeroes
     return "erased", "ATA Erase Completed"
