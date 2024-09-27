@@ -466,6 +466,8 @@ def drivemap():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            # resize nullbytes accordingly
+            nullbytes = bytes(blocksize)
         bytesin = os.read(block,blocksize)
         if bytesin == nullbytes:
             cleancount = cleancount + blocksize
