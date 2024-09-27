@@ -457,6 +457,7 @@ def healthcheck(passno):
 def drivemap():
     # quick mapping of the data on the drive for stats
     global blocksize
+    global nullbytes
     cleancount = 0
     dirtycount = 0
     os.lseek(block, 0, os.SEEK_SET)
