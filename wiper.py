@@ -467,6 +467,7 @@ def drivemap():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
             # resize nullbytes accordingly
             nullbytes = bytes(blocksize)
         bytesin = os.read(block,blocksize)
@@ -584,6 +585,8 @@ def fulltest():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
+            onesbytes = nullbytes.replace(b'\x00', b'\xff')
         #print(devpos, devsize)
         #if devpos == devsize:
         #    print("\n")
@@ -627,6 +630,8 @@ def fulltest():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
+            onesbytes = nullbytes.replace(b'\x00', b'\xff')
         #print(devpos, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
@@ -660,6 +665,8 @@ def fulltest():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
+            onesbytes = nullbytes.replace(b'\x00', b'\xff')
         #print(xx, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
@@ -700,6 +707,8 @@ def fulltest():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
+            onesbytes = nullbytes.replace(b'\x00', b'\xff')
         #print(xx, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
@@ -768,6 +777,7 @@ def singlepass():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
         #print(devpos, devsize)
         #if devpos == devsize:
         #    print("\n")
@@ -814,6 +824,7 @@ def singlepass():
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
         #print(devpos, devsize)
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
