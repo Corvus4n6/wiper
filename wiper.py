@@ -773,6 +773,7 @@ def singlepass():
     # testing or first-time wipe and verify of new media or hunting for stuck bits
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time() # reset the clock
+    nullbytes = bytes(blocksize)
     for devpos in range(0, (devsize), blocksize):
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
