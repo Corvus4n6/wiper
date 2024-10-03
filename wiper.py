@@ -584,6 +584,7 @@ def fulltest():
     # this will run the media through a full wipe and verify test FF,verify,00,verify - designed for full drive
     # testing or first-time wipe and verify of new media or hunting for stuck bits
     #devsize = 1073741824 # DEBUG override 1GB
+    origblocksize=blocksize
     nullbytes = bytes(blocksize)
     onesbytes = nullbytes.replace(b'\x00', b'\xff')
     os.lseek(block, 0, os.SEEK_SET)
@@ -669,6 +670,8 @@ def fulltest():
     # Now repeat for x00 across the whole drive
     os.lseek(block, 0, os.SEEK_SET)
     blocksize = origblocksize
+    nullbytes = bytes(blocksize)
+    onesbytes = nullbytes.replace(b'\x00', b'\xff')
     starttime = time.time()
     for devpos in range(0, (devsize), blocksize):
         if devpos+blocksize > (devsize):
@@ -712,6 +715,8 @@ def fulltest():
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time()
     blocksize = origblocksize
+    nullbytes = bytes(blocksize)
+    onesbytes = nullbytes.replace(b'\x00', b'\xff')
     for devpos in range(0, (devsize), blocksize):
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
