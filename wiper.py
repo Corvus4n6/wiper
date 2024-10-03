@@ -129,6 +129,7 @@ parser.add_argument("-s", "--smart", help="Perform smart wipe", action="store_tr
 parser.add_argument("-z", "--zero", help="Single pass of null bytes", action="store_true")
 parser.add_argument("-c", "--check", help="verify media contains only nulls", action="store_true")
 parser.add_argument("-i", "--inventory", help="add media inventory number to record")
+parser.add_argument("-b", "--blocksize", help="override default working blocksize")
 parser.add_argument("--ataerase", help="Perform ATA Erase", action="store_true")
 parser.add_argument("--atasecure", help="Perform ATA Secure Erase", action="store_true")
 args = parser.parse_args()
@@ -195,7 +196,11 @@ onesbytes = nullbytes.replace(b'\x00', b'\xff')
 def checkblock():
     # ideal for flash media where we want to limit writes
     # override blocksize to be nice to flash media - assume 4k native
-    blocksize = 4096
+    if args.blocksize:
+        # TODO - should I force this to fit in a normal secotor size? 4096/512?
+        blocksize=int(args.blocksize[0])
+    else:
+        blocksize = 4096
     nullbytes = bytes(blocksize)
     print("Block size changed to", ('{:,}'.format(blocksize)), "bytes")
     flushcaches()
@@ -579,6 +584,8 @@ def fulltest():
     # this will run the media through a full wipe and verify test FF,verify,00,verify - designed for full drive
     # testing or first-time wipe and verify of new media or hunting for stuck bits
     #devsize = 1073741824 # DEBUG override 1GB
+    nullbytes = bytes(blocksize)
+    onesbytes = nullbytes.replace(b'\x00', b'\xff')
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time() # reset the clock
     for devpos in range(0, (devsize), blocksize):
@@ -625,6 +632,8 @@ def fulltest():
     # Then read back every block and verify - if there are any mismatches, die.
     os.lseek(block, 0, os.SEEK_SET)
     blocksize = origblocksize
+    nullbytes = bytes(blocksize)
+    onesbytes = nullbytes.replace(b'\x00', b'\xff')
     starttime = time.time()
     for devpos in range(0, (devsize), blocksize):
         if devpos+blocksize > (devsize):
