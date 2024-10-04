@@ -198,11 +198,12 @@ def checkblock():
     # override blocksize to be nice to flash media - assume 4k native
     if args.blocksize:
         # TODO - should I force this to fit in a normal secotor size? 4096/512?
-        blocksize=int(args.blocksize[0])
+        blocksize=int(args.blocksize)
     else:
         blocksize = 4096
+    origblocksize = blocksize
     nullbytes = bytes(blocksize)
-    print("Block size changed to", ('{:,}'.format(blocksize)), "bytes")
+    print("Block size set to", ('{:,}'.format(blocksize)), "bytes")
     flushcaches()
     os.lseek(block, 0, os.SEEK_SET)
     # loop this whole process
@@ -211,6 +212,10 @@ def checkblock():
     for xx in range(0, (devsize), blocksize):
         # seek 4k from current position - loop this part while less than devsize
         devpos = os.lseek(block, 0, os.SEEK_CUR)
+        if devpos+blocksize > (devsize):
+            # taking care of the last block if it's past the end
+            blocksize = (devsize)-devpos
+            nullbytes = bytes(blocksize)
         ##if devpos == devsize:
         ##    print("\n")
         ##    sys.exit(0)
@@ -255,7 +260,7 @@ def checkblock():
             #bytescrc = crc16.crc16xmodem(bytesin)
             # calculate percentage complete
             status = "Position: " + ('{:,}'.format(devpos+blocksize)) + " (" + percentdone + "%)  State: " + trmred + "X " + \
-                     trmnorm + " TTC: " + etatime + " @ " + avgspd + " MBps ("+ str(blockwrites) +" blocks written)  \r"
+                     trmnorm + " TTC: " + etatime + " @ " + avgspd + " MBps ("+ ('{:,}'.format(blockwrites)) +" blocks written)  \r"
             sys.stdout.write(status)
             ##if bytesin != nullbytes:
                 # this write failed - throw an error and stop
@@ -353,7 +358,7 @@ def healthcheck(passno):
 
     # Reallocated Sectors Count - not reported in nvme drives
     try:
-        RSC = re.search('(\d+)$', str(smart.attributes[5])).group(1)
+        RSC = re.search('(\\d+)$', str(smart.attributes[5])).group(1)
         if RSC != "0" and str(smart.attributes[5]) != "None":
             print("Reallocated Sectors Count: " + RSC)
             if passno == 1:
@@ -365,7 +370,7 @@ def healthcheck(passno):
 
     # Reported Uncorrectable Errors
     try:
-        RUE = re.search('(\d+)$', str(smart.attributes[187])).group(1)
+        RUE = re.search('(\\d+)$', str(smart.attributes[187])).group(1)
         if RUE != "0" and str(smart.attributes[187]) != "None":
             print("Reported Uncorrectable Errors: " + RUE)
             if passno == 1:
@@ -377,7 +382,7 @@ def healthcheck(passno):
 
     # Command Timeout
     try:
-        SCT = re.search('(\d+)$', str(smart.attributes[188])).group(1)
+        SCT = re.search('(\\d+)$', str(smart.attributes[188])).group(1)
         if SCT != "0" and str(smart.attributes[188]) != "None":
             print("SMART Command Timeout: " + SCT)
             if passno == 1:
@@ -389,7 +394,7 @@ def healthcheck(passno):
 
     # Current Pending Sector Count
     try:
-        CPSC = re.search('(\d+)$', str(smart.attributes[197])).group(1)
+        CPSC = re.search('(\\d+)$', str(smart.attributes[197])).group(1)
         if CPSC != "0" and str(smart.attributes[197]) != "None":
             print("Current Pending Sector Count: " + CPSC)
             smartfail = input("SMART reports drive issues. Continue? (y/n) ")
@@ -401,7 +406,7 @@ def healthcheck(passno):
 
     # Uncorrectable Sector Count
     try:
-        USC = re.search('(\d+)$', str(smart.attributes[198])).group(1)
+        USC = re.search('(\\d+)$', str(smart.attributes[198])).group(1)
         if USC != "0" and str(smart.attributes[198]) != "None":
             print("Uncorrectable Sector Count: " + USC)
             if passno == 1:
@@ -413,7 +418,7 @@ def healthcheck(passno):
 
     # Power On Hours - informational
     try:
-        POH = re.search('(\d+)$', str(smart.attributes[9])).group(1)
+        POH = re.search('(\\d+)$', str(smart.attributes[9])).group(1)
         print("Power On Hours: " + POH)
     except:
         pass
