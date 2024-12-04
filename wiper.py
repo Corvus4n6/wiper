@@ -178,23 +178,14 @@ blocksize = 4096 * 256
 origblocksize = blocksize
 
 print("Block size set to", ('{:,}'.format(blocksize)), "bytes")
-#sys.exit(0)
-# define null4k block
+# define null block
 nullbytes = bytes(blocksize)
-# define 4k block of FF for the full overwrite tests
+# define block of FF for the full overwrite tests
 onesbytes = nullbytes.replace(b'\x00', b'\xff')
-# byteshash = hashlib.md5(null4k).hexdigest()
-# bytescrc = crc16.crc16xmodem(null4k)
-# print("null md5:", byteshash, "- null crc16:", bytescrc)
-
-# bytesin = os.read(block,4096)
-# byteshash = hashlib.md5(bytesin).hexdigest()
-# print("md5:" , byteshash , "- crc16:" , crc16.crc16xmodem(bytesin))
-# os.lseek(dev,0,os.SEEK_SET)
 
 
 def checkblock():
-    # ideal for flash media where we want to limit writes
+    # "smart" option - ideal for flash media where we want to limit writes
     # override blocksize to be nice to flash media - assume 4k native
     if args.blocksize:
         # TODO - should I force this to fit in a normal secotor size? 4096/512?
@@ -210,21 +201,13 @@ def checkblock():
     starttime = time.time() # reset the clock
     blockwrites = 0
     for xx in range(0, (devsize), blocksize):
-        # seek 4k from current position - loop this part while less than devsize
+        # seek blocksize from current position - loop this part while less than devsize
         devpos = os.lseek(block, 0, os.SEEK_CUR)
         if devpos+blocksize > (devsize):
             # taking care of the last block if it's past the end
             blocksize = (devsize)-devpos
             nullbytes = bytes(blocksize)
-        ##if devpos == devsize:
-        ##    print("\n")
-        ##    sys.exit(0)
         bytesin = os.read(block,blocksize)
-        # byteshash = hashlib.md5(bytesin).hexdigest()
-        # todo - might be even faster to simply compare the strings of nulls and provide feedback visually 0/1
-        # todo - also guaranteed to be accurate with no math issues
-        # bytescrc = crc16.crc16xmodem(bytesin)
-        # testing - remove hashing functions when checking simple bstring comparison
         percentdone = ("%6.3f" % (((devpos+blocksize) / devsize) * 100))
         # calc runtime
         runtime = (time.time() - starttime)
@@ -243,28 +226,15 @@ def checkblock():
                      trmnorm + " TTC: " + etatime + " @ " + avgspd + " MBps  \r"
             sys.stdout.write(status)
         else:
-            ## double hashes note where I took out syncing for speed - sync at end for speed follow by verify
-            ## if no sectors were overwritten, there is no need to verify since we just did.
-            #if bytescrc > 0:
-            # rewind 4k and write
+            # block is not nulled - rewind blocksize and re-write
             devpos = os.lseek(block, -blocksize, os.SEEK_CUR)
-            # print("Position:", devpos)
-            # write 4k nulls and sync
+            # write nulls
             os.write(block, nullbytes)
             blockwrites += 1
-            ##os.sync()
-            # back up 4k and recheck
-            ##devpos = os.lseek(block, -4096, os.SEEK_CUR)
-            ##bytesin = os.read(block,4096)
-            # byteshash = hashlib.md5(bytesin).hexdigest()
-            #bytescrc = crc16.crc16xmodem(bytesin)
             # calculate percentage complete
             status = "Position: " + ('{:,}'.format(devpos+blocksize)) + " (" + percentdone + "%)  State: " + trmred + "X " + \
                      trmnorm + " TTC: " + etatime + " @ " + avgspd + " MBps ("+ ('{:,}'.format(blockwrites)) +" blocks written)  \r"
             sys.stdout.write(status)
-            ##if bytesin != nullbytes:
-                # this write failed - throw an error and stop
-            ##    wipefail(devpos)
     # sync all writes
     sys.stdout.write("\n Syncing...\r")
     os.sync()
@@ -278,11 +248,13 @@ def checkblock():
                     trmnorm + " RT: " + runtimefmt + " @ " + avgspd + " MBps ("+ str(blockwrites) +" blocks written)  \r"
     return "clean", "Single pass overwriting non-clean sectors with nulls. Not verified."
 
+
 def flushcaches():
     # flush cache so we read from disk rather than buffer
     with open('/proc/sys/vm/drop_caches', 'w') as f:
         f.write("1\n")
     return
+
 
 def wipefail(block, position, blocksize, pattern):
     # this will get called when the write fails
@@ -312,7 +284,7 @@ def healthcheck(passno):
     # TODO : add option to continue wiping even if SMART fails for final destruction pass
     # get drive info and health status using smartmontools via pySMART
     # https://github.com/freenas/py-SMART/blob/master/pySMART/device.py
-
+    bailout = False
     from pySMART import Device
     smart = Device(devname)
     if smart.model == None:
@@ -342,9 +314,11 @@ def healthcheck(passno):
         if mountcheck:
             print( trmred + devname + " has mounted partitions. Exiting." + trmnorm )
             showcursor()
-            sys.exit(0)
+            bailout = True
     except:
         pass
+    if bailout == True:
+        sys.exit()
 
     #print(smart)
     # <NVME device on /dev/nvme0n1 mod:SAMSUNG MZVLB512HBJQ-00A00 sn:S5EGNE0MC08271>
@@ -354,7 +328,10 @@ def healthcheck(passno):
         if passno == 1:
             smartfail = input("SMART detects drive as failing. Continue? (y/n) ")
             if smartfail.lower() != "y":
-                sys.exit(0)
+                bailout = True
+
+    if bailout == True:
+        sys.exit()
 
     # Reallocated Sectors Count - not reported in nvme drives
     try:
@@ -364,9 +341,11 @@ def healthcheck(passno):
             if passno == 1:
                 smartfail = input("SMART reports drive issues. Continue? (y/n) ")
                 if smartfail.lower() != "y":
-                    sys.exit(0)
+                    bailout = True
     except:
         pass
+    if bailout == True:
+        sys.exit()
 
     # Reported Uncorrectable Errors
     try:
@@ -376,9 +355,11 @@ def healthcheck(passno):
             if passno == 1:
                 smartfail = input("SMART reports drive issues. Continue? (y/n) ")
                 if smartfail.lower() != "y":
-                    sys.exit(0)
+                    bailout = True
     except:
         pass
+    if bailout == True:
+        sys.exit()
 
     # Command Timeout
     try:
@@ -388,9 +369,11 @@ def healthcheck(passno):
             if passno == 1:
                 smartfail = input("SMART reports drive issues. Continue? (y/n) ")
                 if smartfail.lower() != "y":
-                    sys.exit(0)
+                    bailout = True
     except:
         pass
+    if bailout == True:
+        sys.exit()
 
     # Current Pending Sector Count
     try:
