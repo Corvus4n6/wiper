@@ -383,9 +383,11 @@ def healthcheck(passno):
             smartfail = input("SMART reports drive issues. Continue? (y/n) ")
             if passno == 1:
                 if smartfail.lower() != "y":
-                    sys.exit(0)
+                    bailout = True
     except:
         pass
+    if bailout == True:
+        sys.exit()
 
     # Uncorrectable Sector Count
     try:
@@ -395,9 +397,11 @@ def healthcheck(passno):
             if passno == 1:
                 smartfail = input("SMART reports drive issues. Continue? (y/n) ")
                 if smartfail.lower() != "y":
-                    sys.exit(0)
+                    bailout = True
     except:
         pass
+    if bailout == True:
+        sys.exit()
 
     # Power On Hours - informational
     try:
