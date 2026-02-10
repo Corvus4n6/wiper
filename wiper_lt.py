@@ -540,7 +540,7 @@ def logging(logfile, message):
     '''
     optional logging to file
     '''
-    if logfile is False:
+    if logfile is None:
         return
     with open(logfile, "a", encoding="ascii") as log:
         timestamp = datetime.datetime.now().isoformat()
