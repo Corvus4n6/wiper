@@ -13,6 +13,7 @@ LightweighT version for offline use in the field
 '''
 import os
 import sys
+import signal
 import argparse
 import time
 import datetime
@@ -31,6 +32,20 @@ TRMMAG = "\x1B[35m"  # Magenta (ANSI)
 TRMBMAG = "\x1B[1m\x1B[35m"  # Bold Magenta (ANSI) - errors
 TRMBNORM = "\x1B[0m"  # Normal (ANSI) - normal
 TRMCLR = "\x1B[K" # clear from here to end of line
+
+
+def _sigint_handler(sig, frame):
+    '''
+    Handle Ctrl+C gracefully - restore cursor and exit with a clean message
+    rather than leaving the terminal in a broken state mid-wipe.
+    '''
+    sys.stdout.write("\n")
+    showcursor()
+    print(TRMRED + "Interrupted by user. Exiting." + TRMBNORM)
+    sys.exit(130)  # 130 = 128 + SIGINT, standard shell convention
+
+
+signal.signal(signal.SIGINT, _sigint_handler)
 
 
 def checkblock(block, blocksize, devsize, logfile):
@@ -107,14 +122,22 @@ def checkblock(block, blocksize, devsize, logfile):
 
 def flushcaches():
     '''
-    flush cache so we read from disk rather than buffer
+    flush cache so we read from disk rather than buffer.
+    Silently skips if /proc/sys/vm/drop_caches is not writable (e.g. non-root
+    context or restricted environment) rather than crashing.
     '''
-    with open('/proc/sys/vm/drop_caches', 'w', encoding="ascii") as file_object:
-        file_object.write("1\n")
+    try:
+        with open('/proc/sys/vm/drop_caches', 'w', encoding="ascii") as file_object:
+            file_object.write("1\n")
+    except OSError:
+        pass  # non-fatal: cache flush is a best-effort optimization
 
 def wipefail(block, position, blocksize, pattern, logfile):
     '''
-    this will get called when a write fails
+    Called when a read-back verification mismatch is detected.
+    Attempts a single rewrite of the failed block. If that also fails
+    (bad sector / I/O error), logs the failure and exits rather than
+    silently continuing over unwritable media.
     '''
     print("\nWrite failed at position", position, "- attempting rewrite")
     logging(logfile, f"Write failure detected in block at {position} - rewrite attempted")
@@ -123,20 +146,27 @@ def wipefail(block, position, blocksize, pattern, logfile):
         bytepattern = bytes(blocksize)
     else:
         bytepattern = bytes(blocksize).replace(b'\x00', b'\xff')
-    os.lseek(block, position, os.SEEK_SET)
-    os.write(block, bytepattern)
-    os.sync()
-    # flush the caches
-    flushcaches()
-    # recheck
-    os.lseek(block, position, os.SEEK_SET)
-    bytesin = os.read(block,blocksize)
+    try:
+        os.lseek(block, position, os.SEEK_SET)
+        os.write(block, bytepattern)
+        os.sync()
+        flushcaches()
+        os.lseek(block, position, os.SEEK_SET)
+        bytesin = os.read(block, blocksize)
+    except OSError as exc:
+        msg = f"I/O error during rewrite at position {position}: {exc}"
+        print(TRMRED + "\n" + msg + TRMBNORM)
+        logging(logfile, msg)
+        logging(logfile, "Exiting due to I/O error.")
+        sys.exit(1)
     if bytesin != bytepattern:
-        print("\nRe-Write attempt failed at position", position, "\n")
-        logging(logfile, f"Re-write attempt at position {position} failed. Exiting.")
-        sys.exit()
-    else:
-        return
+        msg = f"Re-write attempt failed at position {position} - sector may be bad."
+        print(TRMRED + "\n" + msg + TRMBNORM)
+        logging(logfile, msg)
+        logging(logfile, "Exiting.")
+        sys.exit(1)
+    # rewrite succeeded - return and continue
+    return
 
 def drivemap(block, blocksize, devsize, logfile):
     '''
@@ -335,8 +365,14 @@ def writeloop(block, blocksize, devsize, pattern, logfile):
         else:
             etatime = "-:--:--"
         #writing pattern
-        os.write(block, writepattern)
-        runtime = (time.time() - starttime)
+        try:
+            os.write(block, writepattern)
+        except OSError as exc:
+            msg = f"I/O write error at position {dev_pos}: {exc}"
+            print(TRMRED + "\n" + msg + TRMBNORM)
+            logging(logfile, msg)
+            logging(logfile, "Exiting due to I/O error.")
+            sys.exit(1)
         mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
         status = (f"Writing 0x{pattern}: {(dev_pos+blocksize):,} ("
             f"{((dev_pos+blocksize) / devsize):.3%})  State: {TRMRED}{pattern}"
@@ -381,8 +417,15 @@ def readloop(block, blocksize, devsize, pattern, logfile):
         else:
             etatime = "-:--:--"
 
-        #reading ones
-        bytesin = os.read(block, blocksize)
+        #reading and verifying
+        try:
+            bytesin = os.read(block, blocksize)
+        except OSError as exc:
+            msg = f"I/O read error at position {dev_pos}: {exc}"
+            print(TRMRED + "\n" + msg + TRMBNORM)
+            logging(logfile, msg)
+            logging(logfile, "Exiting due to I/O error.")
+            sys.exit(1)
         if bytesin != writepattern:
             # this write fails - throw an error and stop
             wipefail(block, dev_pos, blocksize, pattern, logfile)
@@ -549,11 +592,26 @@ def logging(logfile, message):
 
 def diskinfo(devname, logfile):
     '''
-    get additional info about the target drive
+    get additional info about the target drive.
+    Gracefully handles devices not recognized by blkinfo (e.g. unusual
+    block device paths) rather than crashing with an IndexError.
     '''
-    blk = BlkDiskInfo()
-    filters = { 'name' : devname[5:] } # trim /dev/ to make shortname 'sdx'
-    blkdata =  blk.get_disks(filters)[0] #dict
+    try:
+        blk = BlkDiskInfo()
+        filters = { 'name' : devname[5:] } # trim /dev/ to make shortname 'sdx'
+        disks = blk.get_disks(filters)
+        if not disks:
+            print(TRMYEL + "Warning: Device not found in block device list "
+                "(blkinfo). Skipping disk info." + TRMBNORM)
+            logging(logfile, "Warning: Device not recognized by blkinfo - "
+                "disk info skipped.")
+            return
+        blkdata = disks[0]
+    except Exception as exc:  # blkinfo can raise various errors on odd devices
+        print(TRMYEL + f"Warning: Could not retrieve disk info: {exc}" + TRMBNORM)
+        logging(logfile, f"Warning: Could not retrieve disk info: {exc}")
+        return
+
     print(f"Model: {blkdata['model']}")
     logging(logfile, f"Model: {blkdata['model']}")
     print(f"Vendor: {blkdata['vendor']}")
@@ -605,7 +663,17 @@ def main():
     hidecursor()
 
     # direct access to disk to bypass cache, sync writes
-    block = os.open(devname, os.O_RDWR|os.O_SYNC)
+    try:
+        block = os.open(devname, os.O_RDWR | os.O_SYNC)
+    except PermissionError:
+        print(TRMRED + f"ERROR: Permission denied opening {devname}. "
+            "Are you running as root?" + TRMBNORM)
+        logging(logfile, f"ERROR: Permission denied opening {devname}.")
+        sys.exit(1)
+    except OSError as exc:
+        print(TRMRED + f"ERROR: Could not open {devname}: {exc}" + TRMBNORM)
+        logging(logfile, f"ERROR: Could not open {devname}: {exc}")
+        sys.exit(1)
     # figure out the total size of the target
     devsize = os.lseek(block, 0, os.SEEK_END)
     # seek back to the beginning
@@ -613,7 +681,13 @@ def main():
 
     # user has the option to override
     if args.blocksize:
-        blocksize = int(args.blocksize)
+        try:
+            blocksize = int(args.blocksize)
+            if blocksize <= 0:
+                raise ValueError
+        except ValueError:
+            print(TRMRED + "ERROR: --blocksize must be a positive integer." + TRMBNORM)
+            sys.exit(1)
     else:
         # set default blocksize to 1MB = 4096*256
         blocksize = 4096 * 256
