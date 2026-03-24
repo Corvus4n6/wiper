@@ -41,13 +41,13 @@ def checkblock(block, blocksize, devsize, logfile):
     override blocksize to be nice to flash media - assume 4k native
     '''
     logging(logfile, "Smart wipe started")
-    #orig_blocksize = blocksize
     nullbytes = bytes(blocksize)
     flushcaches()
     os.lseek(block, 0, os.SEEK_SET)
     # loop this whole process
     starttime = time.time() # reset the clock
     blockwrites = 0
+    devpos = 0  # initialize so final status line is safe if loop doesn't run
     for _ in range(0, (devsize), blocksize):
         # seek blocksize from current position - loop this part while less than devsize
         devpos = os.lseek(block, 0, os.SEEK_CUR)
@@ -122,7 +122,7 @@ def wipefail(block, position, blocksize, pattern, logfile):
     if pattern == "00":
         bytepattern = bytes(blocksize)
     else:
-        bytepattern = bytepattern.replace(b'\x00', b'\xff')
+        bytepattern = bytes(blocksize).replace(b'\x00', b'\xff')
     os.lseek(block, position, os.SEEK_SET)
     os.write(block, bytepattern)
     os.sync()
@@ -190,9 +190,8 @@ def drivemap(block, blocksize, devsize, logfile):
         logging(logfile, "Drive mapped. Drive is clear and only contains 0x00.")
         return
     print(TRMRED + "Drive is not clear." + TRMBNORM)
-    logging(logfile, "Drive mapped. Drive is dirty and contains non-nulled "
-        "data. " + cleanpct + "% clean and " + dirtypct + "% dirty (" +
-        str(dirtycount) + " blocks).")
+    logging(logfile, f"Drive mapped. Drive is dirty and contains non-nulled "
+        f"data. {cleanpct} clean and {dirtypct} dirty ({dirtycount:,} bytes).")
     return
 
 def command_line(cmd, cmdtimeout=None):
@@ -274,11 +273,9 @@ def ataerase(devname, logfile):
         sys.exit("ERROR: hdparm utility not found. Exiting.")
     # get current drive status
     hdpi = command_line(['hdparm','-I', devname]).decode(errors='replace')
-    if not re.search('supported: enhanced erase', hdpi):
-        logging(logfile, "ERROR: ATA Secure Erase not supported for this device. "
-            "Exiting.")
-        sys.exit("ERROR: ATA Secure Erase not supported for this device. "
-            "Exiting.")
+    if not re.search(r'(?<!not\t)supported: enhanced erase', hdpi):
+        logging(logfile, "ERROR: ATA Erase not supported for this device. Exiting.")
+        sys.exit("ERROR: ATA Erase not supported for this device. Exiting.")
     if not re.search('(not\tfrozen)', hdpi):
         logging(logfile, "ERROR: Drive is currently frozen. Exiting.")
         sys.exit("ERROR: Drive is currently frozen. Exiting.")
@@ -339,10 +336,12 @@ def writeloop(block, blocksize, devsize, pattern, logfile):
             etatime = "-:--:--"
         #writing pattern
         os.write(block, writepattern)
+        runtime = (time.time() - starttime)
+        mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
         status = (f"Writing 0x{pattern}: {(dev_pos+blocksize):,} ("
             f"{((dev_pos+blocksize) / devsize):.3%})  State: {TRMRED}{pattern}"
             f"{TRMBNORM}  TTC: {etatime} @ "
-            f"{((dev_pos+blocksize) / runtime / 1024 / 1024):0.2f} MBps{TRMCLR}"
+            f"{mbps:0.2f} MBps{TRMCLR}"
             f"\r")
         sys.stdout.write(status)
 
@@ -387,10 +386,12 @@ def readloop(block, blocksize, devsize, pattern, logfile):
         if bytesin != writepattern:
             # this write fails - throw an error and stop
             wipefail(block, dev_pos, blocksize, pattern, logfile)
+        runtime = (time.time() - starttime)
+        mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
         status = (f"Verifying 0x{pattern}: {(dev_pos+blocksize):,} ("
             f"{((dev_pos+blocksize) / devsize):.3%})  State: {TRMGRN}"
             f"{pattern}{TRMBNORM}  TTC: {etatime} @ "
-            f"{((dev_pos+blocksize) / runtime / 1024 / 1024):0.2f} MBps"
+            f"{mbps:0.2f} MBps"
             f"{TRMCLR}\r")
         sys.stdout.write(status)
     runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
@@ -596,10 +597,7 @@ def main():
         print("ERROR: Target device ", devname, "not found.")
         sys.exit(1)
 
-    try:
-        logfile = args.logfile
-    except NameError:
-        logfile = False
+    logfile = args.logfile  # None if not provided by user
 
     atexit.register(cleanup)
     # calling main functions here - need to do this with arguments eventually
