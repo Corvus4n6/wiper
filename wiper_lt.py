@@ -21,6 +21,9 @@ import math
 import re
 import subprocess
 import atexit
+import socket
+from dataclasses import dataclass, field
+from typing import Optional
 from blkinfo import BlkDiskInfo
 from rich.console import Console
 from rich.progress import (
@@ -35,6 +38,113 @@ from rich import box
 console = Console(highlight=False)
 
 
+@dataclass
+class WipeRecord:
+    '''
+    Accumulates all facts about a wipe session so they can be written
+    to a certificate at the end. Passed through main() and populated
+    as each stage completes.
+    '''
+    # Identity
+    operator_host: str  = field(default_factory=lambda: socket.gethostname())
+    operator_name: str  = ""
+    start_time: str     = field(default_factory=lambda: datetime.datetime.now().isoformat(timespec='seconds'))
+    end_time: str       = ""
+
+    # Operation
+    operation: str      = ""
+    dry_run: bool       = False
+    command: str        = ""
+
+    # Device
+    device_path: str    = ""
+    device_size: int    = 0
+    block_size: int     = 0
+    model: str          = "—"
+    vendor: str         = "—"
+    serial: str         = "—"
+    transport: str      = "—"
+
+    # Outcome
+    success: bool       = False
+    notes: str          = ""
+
+
+def generate_certificate(record: WipeRecord, report_path: str, logfile):
+    '''
+    Write a plain-text wipe certificate to report_path.
+    The certificate is human-readable and suitable for printing or archiving.
+    '''
+    width = 72
+    border = "=" * width
+
+    def centre(text):
+        return text.center(width)
+
+    def row(label, value, indent=2):
+        label_str = f"{' ' * indent}{label:<22}"
+        return f"{label_str}{value}"
+
+    size_gib = record.device_size / 1024 / 1024 / 1024
+
+    lines = [
+        border,
+        centre("O.W.L. — MEDIA STERILIZATION CERTIFICATE"),
+        centre("Optimized Wipe and Logging — Corvus Forensics LLC"),
+        border,
+        "",
+        centre("OPERATION DETAILS"),
+        "-" * width,
+        row("Operation:",        record.operation),
+        row("Status:",           "DRY RUN (no data written)" if record.dry_run
+                                 else ("COMPLETED SUCCESSFULLY" if record.success
+                                 else "FAILED / INCOMPLETE")),
+        row("Command:",          record.command),
+        row("Start time:",       record.start_time),
+        row("End time:",         record.end_time or "—"),
+        row("Operator:",         record.operator_name or "—"),
+        row("Operator host:",    record.operator_host),
+        "",
+        centre("DEVICE DETAILS"),
+        "-" * width,
+        row("Device path:",      record.device_path),
+        row("Size (bytes):",     f"{record.device_size:,}"),
+        row("Size (GiB):",       f"{size_gib:.2f} GiB"),
+        row("Block size:",       f"{record.block_size:,} bytes"),
+        row("Model:",            record.model),
+        row("Vendor:",           record.vendor),
+        row("Serial:",           record.serial),
+        row("Transport:",        record.transport),
+        "",
+    ]
+
+    if record.notes:
+        lines += [
+            centre("NOTES"),
+            "-" * width,
+            *[f"  {line}" for line in record.notes.splitlines()],
+            "",
+        ]
+
+    lines += [
+        border,
+        centre("END OF CERTIFICATE"),
+        border,
+        "",
+    ]
+
+    cert_text = "\n".join(lines)
+
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(cert_text)
+        console.print(f"\n[bold green]✓ Certificate written to:[/] {report_path}")
+        logging(logfile, f"Certificate written to {report_path}")
+    except OSError as exc:
+        console.print(f"[bold red]✗ Could not write certificate to {report_path}: {exc}[/]")
+        logging(logfile, f"ERROR: Could not write certificate: {exc}")
+
+
 def _sigint_handler(sig, frame):
     '''
     Handle Ctrl+C gracefully - restore cursor and exit with a clean message
@@ -47,22 +157,27 @@ def _sigint_handler(sig, frame):
 signal.signal(signal.SIGINT, _sigint_handler)
 
 
-def checkblock(block, blocksize, devsize, logfile):
+def checkblock(block, blocksize, devsize, logfile, dry_run=False):
     '''
     --smart / -s
     Single pass overwriting non-clean sectors with nulls. Not verified.
     Ideal for flash media where we want to limit writes.
+    If dry_run is True, detects dirty sectors but does not overwrite them.
     '''
-    logging(logfile, "Smart wipe started")
+    if dry_run:
+        logging(logfile, "DRY RUN: Smart wipe simulation started")
+    else:
+        logging(logfile, "Smart wipe started")
     nullbytes = bytes(blocksize)
     flushcaches()
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time()
     blockwrites = 0
     devpos = 0
+    dry_tag = " [bold yellow][DRY RUN][/]" if dry_run else ""
 
     with Progress(
-        TextColumn("[bold cyan]{task.description}"),
+        TextColumn(f"[bold cyan]Smart wipe[/]{dry_tag}"),
         BarColumn(bar_width=None),
         TaskProgressColumn(),
         TimeRemainingColumn(),
@@ -83,22 +198,30 @@ def checkblock(block, blocksize, devsize, logfile):
             mbps = (devpos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
 
             if bytesin != nullbytes:
-                devpos = os.lseek(block, -blocksize, os.SEEK_CUR)
-                os.write(block, nullbytes)
+                if not dry_run:
+                    devpos = os.lseek(block, -blocksize, os.SEEK_CUR)
+                    os.write(block, nullbytes)
                 blockwrites += 1
 
             progress.update(task, completed=devpos + blocksize, mbps=mbps, writes=blockwrites)
 
-    console.print("\n[dim]Syncing...[/]", end="\r")
-    os.sync()
+    console.print("[dim]Syncing...[/]")
+    if not dry_run:
+        os.sync()
     flushcaches()
 
     runtime = time.time() - starttime
     runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
     mbps = (devpos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
-    summary = (f"Smart wipe complete. {devpos + blocksize:,} bytes checked. "
-               f"{blockwrites} blocks rewritten. {runtimefmt} @ {mbps:.2f} MB/s")
-    console.print(f"[bold green]✓[/] {summary}")
+    if dry_run:
+        summary = (f"DRY RUN — smart wipe scan: {devpos + blocksize:,} bytes checked, "
+                   f"{blockwrites} dirty blocks found (not overwritten). "
+                   f"~{runtimefmt} @ {mbps:.2f} MB/s")
+        console.print(f"[bold yellow]~[/] {summary}")
+    else:
+        summary = (f"Smart wipe complete. {devpos + blocksize:,} bytes checked. "
+                   f"{blockwrites} blocks rewritten. {runtimefmt} @ {mbps:.2f} MB/s")
+        console.print(f"[bold green]✓[/] {summary}")
     logging(logfile, summary)
     logging(logfile, "Clean. Single pass overwriting non-clear sectors with nulls. Not verified.")
 
@@ -316,12 +439,17 @@ def ataerase(devname, logfile):
     logging(logfile, "ATA Erase completed.")
     # note: we can't call this 'clean' or 'clear' because the pattern may not be zeroes
 
-def writeloop(block, blocksize, devsize, pattern, logfile):
+def writeloop(block, blocksize, devsize, pattern, logfile, dry_run=False):
     '''
     Full disk write pass — writes a single byte pattern across the entire device.
+    If dry_run is True, seeks and reads normally but skips all os.write() calls.
     '''
-    logging(logfile, f"Writing 0x{pattern} to drive.")
+    if dry_run:
+        logging(logfile, f"DRY RUN: Would write 0x{pattern} to drive.")
+    else:
+        logging(logfile, f"Writing 0x{pattern} to drive.")
     color = "red" if pattern == "FF" else "cyan"
+    dry_tag = " [bold yellow][DRY RUN][/]" if dry_run else ""
     if pattern == "00":
         writepattern = bytes(blocksize)
     else:
@@ -330,7 +458,7 @@ def writeloop(block, blocksize, devsize, pattern, logfile):
     starttime = time.time()
 
     with Progress(
-        TextColumn(f"[bold {color}]Write 0x{pattern}[/]"),
+        TextColumn(f"[bold {color}]Write 0x{pattern}[/]{dry_tag}"),
         BarColumn(bar_width=None),
         TaskProgressColumn(),
         TimeRemainingColumn(),
@@ -346,14 +474,18 @@ def writeloop(block, blocksize, devsize, pattern, logfile):
                     writepattern = bytes(blocksize)
                 else:
                     writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
-            try:
-                os.write(block, writepattern)
-            except OSError as exc:
-                msg = f"I/O write error at position {dev_pos}: {exc}"
-                console.print(f"[bold red]✗ {msg}[/]")
-                logging(logfile, msg)
-                logging(logfile, "Exiting due to I/O error.")
-                sys.exit(1)
+            if not dry_run:
+                try:
+                    os.write(block, writepattern)
+                except OSError as exc:
+                    msg = f"I/O write error at position {dev_pos}: {exc}"
+                    console.print(f"[bold red]✗ {msg}[/]")
+                    logging(logfile, msg)
+                    logging(logfile, "Exiting due to I/O error.")
+                    sys.exit(1)
+            else:
+                # simulate the time cost of a seek without writing
+                os.lseek(block, dev_pos + blocksize, os.SEEK_SET)
             runtime = time.time() - starttime
             mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
             progress.update(task, completed=dev_pos + blocksize, mbps=mbps)
@@ -361,8 +493,12 @@ def writeloop(block, blocksize, devsize, pattern, logfile):
     runtime = time.time() - starttime
     mbps = devsize / runtime / 1024 / 1024 if runtime > 0 else 0.0
     runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
-    summary = f"Wrote 0x{pattern}: {devsize:,} bytes in {runtimefmt} @ {mbps:.2f} MB/s"
-    console.print(f"[bold green]✓[/] {summary}")
+    if dry_run:
+        summary = f"DRY RUN — would write 0x{pattern}: {devsize:,} bytes in ~{runtimefmt} @ {mbps:.2f} MB/s"
+        console.print(f"[bold yellow]~[/] {summary}")
+    else:
+        summary = f"Wrote 0x{pattern}: {devsize:,} bytes in {runtimefmt} @ {mbps:.2f} MB/s"
+        console.print(f"[bold green]✓[/] {summary}")
     logging(logfile, summary)
 
 def readloop(block, blocksize, devsize, pattern, logfile):
@@ -417,48 +553,42 @@ def readloop(block, blocksize, devsize, pattern, logfile):
 
 
 
-def fulltest(block, blocksize, devsize, logfile):
+def fulltest(block, blocksize, devsize, logfile, dry_run=False):
     '''
     --full / -f - check all bits flip both ways and verify
     '''
     logging(logfile, "Full drive double-wipe and verify started")
-    # this will run the media through a full wipe and verify test
-    # FF,verify,00,verify - designed for full drive
-    # testing or first-time wipe and verify of new media or hunting for stuck
-    # bits
 
-    # write ones to disk first
-    writeloop(block, blocksize, devsize, "FF", logfile)
+    writeloop(block, blocksize, devsize, "FF", logfile, dry_run)
     console.print("[dim]Syncing...[/]")
-    os.sync()
+    if not dry_run:
+        os.sync()
     flushcaches()
 
     readloop(block, blocksize, devsize, "FF", logfile)
 
-    writeloop(block, blocksize, devsize, "00", logfile)
+    writeloop(block, blocksize, devsize, "00", logfile, dry_run)
 
     console.print("[dim]Syncing...[/]")
-    os.sync()
+    if not dry_run:
+        os.sync()
     flushcaches()
 
     readloop(block, blocksize, devsize, "00", logfile)
 
     logging(logfile, "Double wipe and verify completed.")
 
-def singlepass(block, blocksize, devsize, logfile):
+def singlepass(block, blocksize, devsize, logfile, dry_run=False):
     '''
     --zero / -z - write a null to every sector and then verify
     '''
     logging(logfile, "Single-pass null and verify started")
-    # this will run the media through a full wipe and verify test
-    # FF,verify,00,verify - designed for full drive
-    # testing or first-time wipe and verify of new media or hunting for stuck
-    # bits
 
-    writeloop(block, blocksize, devsize, "00", logfile)
+    writeloop(block, blocksize, devsize, "00", logfile, dry_run)
 
     console.print("[dim]Syncing...[/]")
-    os.sync()
+    if not dry_run:
+        os.sync()
     flushcaches()
 
     readloop(block, blocksize, devsize, "00", logfile)
@@ -517,6 +647,159 @@ def prettyheader(devname, devsize, blocksize, logfile):
     logging(logfile, f"Block size set to {blocksize:,} bytes")
 
 
+def confirm_wipe(devname, devsize, operation, logfile):
+    '''
+    Safety gate before any destructive operation.
+    Displays a clear warning panel and requires the user to type the exact
+    device path to proceed. Bails out on anything that doesn't match.
+    '''
+    size_gib = devsize / 1024 / 1024 / 1024
+
+    warning = Text()
+    warning.append("  ⚠  WARNING: DESTRUCTIVE OPERATION  ⚠\n\n", style="bold red")
+    warning.append("Operation : ", style="bold white")
+    warning.append(f"{operation}\n", style="bold yellow")
+    warning.append("Device    : ", style="bold white")
+    warning.append(f"{devname}\n", style="bold yellow")
+    warning.append("Data size : ", style="bold white")
+    warning.append(f"{devsize:,} bytes  ({size_gib:.2f} GiB)\n\n", style="bold yellow")
+    warning.append("ALL DATA ON THIS DEVICE WILL BE PERMANENTLY DESTROYED.\n", style="bold red")
+    warning.append("This action cannot be undone.", style="red")
+
+    console.print(Panel(warning, border_style="bold red", padding=(1, 2)))
+    console.print(f"[bold]To confirm, type the device path exactly:[/] ", end="")
+
+    try:
+        response = input()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[bold red]Aborted.[/]")
+        logging(logfile, "Wipe confirmation aborted by user (EOF/interrupt).")
+        sys.exit(1)
+
+    if response.strip() != devname:
+        console.print(
+            f"\n[bold red]✗ Input did not match '{devname}'. Aborting.[/]\n"
+        )
+        logging(logfile, f"Wipe confirmation failed. User entered '{response.strip()}' "
+            f"instead of '{devname}'. Aborting.")
+        sys.exit(1)
+
+    console.print(f"[bold green]✓ Confirmed. Starting {operation}...[/]\n")
+    logging(logfile, f"Wipe confirmed by user. Starting {operation}.")
+
+
+def list_devices():
+    '''
+    --list
+    Enumerate all block devices visible to the system and print a rich table.
+    Uses blkinfo as the primary source; falls back to parsing lsblk output
+    if blkinfo raises or returns nothing.
+    '''
+    console.print()
+
+    try:
+        blk = BlkDiskInfo()
+        disks = blk.get_disks()
+    except Exception as exc:
+        console.print(f"[yellow]blkinfo unavailable ({exc}), falling back to lsblk.[/]")
+        disks = []
+
+    if disks:
+        table = Table(
+            title="Available Block Devices",
+            box=box.ROUNDED,
+            border_style="cyan",
+            header_style="bold cyan",
+            show_lines=False,
+        )
+        table.add_column("Device",     style="bold white",  no_wrap=True)
+        table.add_column("Model",      style="white")
+        table.add_column("Vendor",     style="dim white")
+        table.add_column("Serial",     style="dim white")
+        table.add_column("Transport",  style="cyan",        no_wrap=True)
+        table.add_column("Size",       style="green",       justify="right", no_wrap=True)
+        table.add_column("Mounted",    style="yellow",      no_wrap=True)
+
+        for disk in disks:
+            devname   = f"/dev/{disk.get('name', '?')}"
+            model     = str(disk.get('model',  '') or '').strip() or '—'
+            vendor    = str(disk.get('vendor', '') or '').strip() or '—'
+            serial    = str(disk.get('serial', '') or '').strip() or '—'
+            transport = str(disk.get('tran',   '') or '').strip() or '—'
+
+            # size: blkinfo gives bytes as a string in 'size'
+            try:
+                size_bytes = int(disk.get('size', 0))
+                size_gib   = size_bytes / 1024 / 1024 / 1024
+                size_str   = f"{size_gib:.1f} GiB"
+            except (ValueError, TypeError):
+                size_str = str(disk.get('size', '—'))
+
+            # mount status: walk children for any mounted partition
+            mounts = _collect_mounts(disk)
+            if mounts:
+                mounted_str = "[bold red]YES[/]"
+            else:
+                mounted_str = "[green]no[/]"
+
+            table.add_row(devname, model, vendor, serial, transport, size_str, mounted_str)
+
+        console.print(table)
+
+    else:
+        # blkinfo fallback — parse lsblk -d -o NAME,MODEL,SERIAL,TRAN,SIZE,TYPE
+        lsblk_out = command_line(
+            ['lsblk', '-d', '-o', 'NAME,MODEL,SERIAL,TRAN,SIZE,TYPE,MOUNTPOINT'],
+            cmdtimeout=5
+        )
+        if not lsblk_out:
+            console.print("[bold red]Could not enumerate block devices. "
+                "Is lsblk available?[/]")
+            return
+
+        lines = lsblk_out.decode(errors='replace').splitlines()
+
+        table = Table(
+            title="Available Block Devices",
+            box=box.ROUNDED,
+            border_style="cyan",
+            header_style="bold cyan",
+        )
+        # Parse the header row to build columns dynamically
+        if lines:
+            for col in lines[0].split():
+                table.add_column(col, style="white", no_wrap=True)
+            for line in lines[1:]:
+                parts = line.split()
+                # colour the NAME column bold, flag mounted devices
+                if parts:
+                    parts[0] = f"[bold]/dev/{parts[0]}[/]"
+                table.add_row(*parts)
+
+        console.print(table)
+
+    console.print()
+    console.print("[dim]Devices marked [bold yellow]Mounted: YES[/] have active partitions "
+        "— OWL will refuse to wipe them.[/]")
+    console.print()
+
+
+def _collect_mounts(node):
+    '''
+    Recursively walk a blkinfo disk dict and collect all non-empty mountpoints.
+    '''
+    mounts = []
+    for key, value in node.items():
+        if key == 'mountpoint' and value:
+            mounts.append(value)
+        elif key == 'children' and isinstance(value, list):
+            for child in value:
+                mounts.extend(_collect_mounts(child))
+        elif isinstance(value, dict):
+            mounts.extend(_collect_mounts(value))
+    return mounts
+
+
 def parse_arguments():
     '''
     handle command line args
@@ -524,7 +807,7 @@ def parse_arguments():
     arghelpdesc = ("Health check, sterilization, verification, and logging for"
         " data storage devices.")
     parser = argparse.ArgumentParser(description=arghelpdesc)
-    parser.add_argument("target", help="Path to block device", nargs=1)
+    parser.add_argument("target", help="Path to block device", nargs="?", default=None)
     parser.add_argument("-f", "--full",
         help="Full double wipe and verify [default]",
         action="store_true")
@@ -541,6 +824,16 @@ def parse_arguments():
         action="store_true")
     parser.add_argument("--atasecure", help="Perform ATA Secure Erase",
         action="store_true")
+    parser.add_argument("--dry-run", help="Simulate wipe without writing any data",
+        action="store_true", dest="dry_run")
+    parser.add_argument("--list", help="List available block devices and exit",
+        action="store_true")
+    parser.add_argument("--report", help="Write a wipe certificate to this file path "
+        "(auto-named if path is a directory or omitted with this flag)",
+        metavar="PATH", default=None)
+    parser.add_argument("--operator", help="Name of the operator performing the wipe "
+        "(recorded in the certificate, requires --report)",
+        metavar="NAME", default=None)
 
     return parser.parse_args()
 
@@ -559,6 +852,7 @@ def diskinfo(devname, logfile):
     get additional info about the target drive.
     Gracefully handles devices not recognized by blkinfo (e.g. unusual
     block device paths) rather than crashing with an IndexError.
+    Returns a dict of disk fields, or an empty dict if info is unavailable.
     '''
     try:
         blk = BlkDiskInfo()
@@ -568,12 +862,12 @@ def diskinfo(devname, logfile):
             console.print("[yellow]Warning: Device not found in block device list "
                 "(blkinfo). Skipping disk info.[/]")
             logging(logfile, "Warning: Device not recognized by blkinfo - disk info skipped.")
-            return
+            return {}
         blkdata = disks[0]
     except Exception as exc:
         console.print(f"[yellow]Warning: Could not retrieve disk info: {exc}[/]")
         logging(logfile, f"Warning: Could not retrieve disk info: {exc}")
-        return
+        return {}
 
     info = Table.grid(padding=(0, 2))
     info.add_column(style="bold cyan", justify="right")
@@ -593,6 +887,8 @@ def diskinfo(devname, logfile):
         console.print("[bold red]Device has mounted partitions. Exiting.[/]")
         logging(logfile, "Exiting.")
         sys.exit()
+
+    return blkdata
 
 def mountcheck(blkdata, logfile, mountct):
     '''
@@ -619,19 +915,61 @@ def main():
     '''
     args = parse_arguments()
 
-    devname = os.path.abspath(args.target[0])
+    # --list needs no target and no root — handle and exit immediately
+    if args.list:
+        list_devices()
+        sys.exit(0)
+
+    # All other operations require a target device
+    if args.target is None:
+        console.print("[bold red]ERROR: A target device is required. "
+            "Use --list to see available devices.[/]")
+        sys.exit(1)
+
+    devname = os.path.abspath(args.target)
     if not os.path.exists(devname):
-        console.print(f"[bold red]ERROR: Target device {devname} not found.[/]")
+        console.print(f"[bold red]ERROR: Target device {devname} not found. "
+            "Use --list to see available devices.[/]")
         sys.exit(1)
 
     logfile = args.logfile  # None if not provided by user
+    dry_run = args.dry_run
+
+    # Determine operation label early for the record
+    if args.check:
+        operation = "Drive Map / Null Check (read-only)"
+    elif args.smart:
+        operation = "Smart Wipe (selective null overwrite)"
+    elif args.zero:
+        operation = "Single-Pass Zero + Verify"
+    elif args.full:
+        operation = "Full Double Wipe + Verify (FF then 00)"
+    elif args.atasecure:
+        operation = "ATA Secure Erase (Enhanced)"
+    elif args.ataerase:
+        operation = "ATA Erase"
+    else:
+        operation = "Full Double Wipe + Verify (FF then 00) [default]"
+
+    record = WipeRecord(
+        operation=operation,
+        dry_run=dry_run,
+        command=' '.join(sys.argv),
+        device_path=devname,
+        operator_name=args.operator or "",
+    )
+
+    if args.operator and args.report is None:
+        console.print("[yellow]⚠ --operator was specified but --report was not. "
+            "The operator name will not be saved unless --report is also used.[/]")
 
     atexit.register(cleanup)
     rootcheck()
 
-    # direct access to disk to bypass cache, sync writes
+    # In dry-run mode open read-only — we will never write to the device
+    open_flags = os.O_RDONLY if dry_run else os.O_RDWR | os.O_SYNC
     try:
-        block = os.open(devname, os.O_RDWR | os.O_SYNC)
+        block = os.open(devname, open_flags)
     except PermissionError:
         console.print(f"[bold red]ERROR: Permission denied opening {devname}. "
             "Are you running as root?[/]")
@@ -644,6 +982,7 @@ def main():
 
     devsize = os.lseek(block, 0, os.SEEK_END)
     os.lseek(block, 0, os.SEEK_SET)
+    record.device_size = devsize
 
     if args.blocksize:
         try:
@@ -656,23 +995,78 @@ def main():
     else:
         blocksize = 4096 * 256  # default 1MB
 
+    record.block_size = blocksize
+
     prettyheader(devname, devsize, blocksize, logfile)
-    diskinfo(devname, logfile)
+
+    if dry_run:
+        console.print(Panel(
+            "[bold yellow]DRY RUN MODE[/] — Device will be read but [bold]never written to.[/]\n"
+            "Progress bars show estimated timing. Verification passes use real reads.",
+            border_style="yellow", padding=(0, 2)
+        ))
+        console.print()
+        logging(logfile, "DRY RUN mode active — no writes will occur.")
+
+    blkdata = diskinfo(devname, logfile)
+    if blkdata:
+        record.model     = str(blkdata.get('model',  '') or '—').strip()
+        record.vendor    = str(blkdata.get('vendor', '') or '—').strip()
+        record.serial    = str(blkdata.get('serial', '') or '—').strip()
+        record.transport = str(blkdata.get('tran',   '') or '—').strip()
 
     if args.check:
         drivemap(block, blocksize, devsize, logfile)
+        record.success = True
+        record.notes   = "Read-only check. No data was written."
     elif args.smart:
-        checkblock(block, blocksize, devsize, logfile)
+        if not dry_run:
+            confirm_wipe(devname, devsize, operation, logfile)
+        checkblock(block, blocksize, devsize, logfile, dry_run)
+        record.success = True
     elif args.zero:
-        singlepass(block, blocksize, devsize, logfile)
+        if not dry_run:
+            confirm_wipe(devname, devsize, operation, logfile)
+        singlepass(block, blocksize, devsize, logfile, dry_run)
+        record.success = True
     elif args.full:
-        fulltest(block, blocksize, devsize, logfile)
+        if not dry_run:
+            confirm_wipe(devname, devsize, operation, logfile)
+        fulltest(block, blocksize, devsize, logfile, dry_run)
+        record.success = True
     elif args.atasecure:
-        atasecure(devname, logfile)
+        if dry_run:
+            console.print("[yellow]⚠ --dry-run has no effect with --atasecure "
+                "(ATA commands are issued by hdparm, not OWL). Skipping.[/]")
+        else:
+            confirm_wipe(devname, devsize, operation, logfile)
+            atasecure(devname, logfile)
+            record.success = True
     elif args.ataerase:
-        ataerase(devname, logfile)
+        if dry_run:
+            console.print("[yellow]⚠ --dry-run has no effect with --ataerase "
+                "(ATA commands are issued by hdparm, not OWL). Skipping.[/]")
+        else:
+            confirm_wipe(devname, devsize, operation, logfile)
+            ataerase(devname, logfile)
+            record.success = True
     else:
-        fulltest(block, blocksize, devsize, logfile)
+        if not dry_run:
+            confirm_wipe(devname, devsize, operation, logfile)
+        fulltest(block, blocksize, devsize, logfile, dry_run)
+        record.success = True
+
+    record.end_time = datetime.datetime.now().isoformat(timespec='seconds')
+
+    # Generate certificate if --report was requested
+    if args.report is not None:
+        report_path = args.report
+        # If the user gave a directory, auto-name the file inside it
+        if os.path.isdir(report_path):
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            devshort = devname.replace('/', '_').strip('_')
+            report_path = os.path.join(report_path, f"owl_cert_{devshort}_{ts}.txt")
+        generate_certificate(record, report_path, logfile)
 
     logging(logfile, "Exited")
 
