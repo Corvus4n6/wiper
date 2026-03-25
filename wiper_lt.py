@@ -22,16 +22,17 @@ import re
 import subprocess
 import atexit
 from blkinfo import BlkDiskInfo
+from rich.console import Console
+from rich.progress import (
+    Progress, BarColumn, TextColumn, TimeRemainingColumn,
+    TransferSpeedColumn, TaskProgressColumn,
+)
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich import box
 
-# Set the color bits we need for outputting to the terminal
-TRMRED = "\x1B[1m\x1B[31m"  # Bold Red (ANSI) - malware
-TRMGRN = "\x1B[0m\x1B[32m"  # Normal Green (ANSI) - clean
-TRMCYN = "\x1B[1m\x1B[36m"  # Bold Cyan (ANSI)
-TRMYEL = "\x1B[0m\x1B[33m"  # Normal Yellow (ANSI) - unknown
-TRMMAG = "\x1B[35m"  # Magenta (ANSI)
-TRMBMAG = "\x1B[1m\x1B[35m"  # Bold Magenta (ANSI) - errors
-TRMBNORM = "\x1B[0m"  # Normal (ANSI) - normal
-TRMCLR = "\x1B[K" # clear from here to end of line
+console = Console(highlight=False)
 
 
 def _sigint_handler(sig, frame):
@@ -39,9 +40,7 @@ def _sigint_handler(sig, frame):
     Handle Ctrl+C gracefully - restore cursor and exit with a clean message
     rather than leaving the terminal in a broken state mid-wipe.
     '''
-    sys.stdout.write("\n")
-    showcursor()
-    print(TRMRED + "Interrupted by user. Exiting." + TRMBNORM)
+    console.print("\n[bold red]Interrupted by user. Exiting.[/]")
     sys.exit(130)  # 130 = 128 + SIGINT, standard shell convention
 
 
@@ -51,74 +50,59 @@ signal.signal(signal.SIGINT, _sigint_handler)
 def checkblock(block, blocksize, devsize, logfile):
     '''
     --smart / -s
-    "Single pass overwriting non-clean sectors with nulls. Not verified."
-    "smart" option - ideal for flash media where we want to limit writes
-    override blocksize to be nice to flash media - assume 4k native
+    Single pass overwriting non-clean sectors with nulls. Not verified.
+    Ideal for flash media where we want to limit writes.
     '''
     logging(logfile, "Smart wipe started")
     nullbytes = bytes(blocksize)
     flushcaches()
     os.lseek(block, 0, os.SEEK_SET)
-    # loop this whole process
-    starttime = time.time() # reset the clock
+    starttime = time.time()
     blockwrites = 0
-    devpos = 0  # initialize so final status line is safe if loop doesn't run
-    for _ in range(0, (devsize), blocksize):
-        # seek blocksize from current position - loop this part while less than devsize
-        devpos = os.lseek(block, 0, os.SEEK_CUR)
-        if devpos+blocksize > (devsize):
-            # taking care of the last block if it's past the end
-            blocksize = (devsize)-devpos
-            nullbytes = bytes(blocksize)
-        bytesin = os.read(block,blocksize)
-        # calc runtime
-        runtime = (time.time() - starttime)
-        # calc time remaining
-        if runtime > 0 and devpos > 0:
-            etasec = math.floor((devsize - devpos) / (devpos / runtime))
-            etatime = str(datetime.timedelta(seconds=etasec))
-        else:
-            etatime = "-:--:--"
+    devpos = 0
 
-        if bytesin == nullbytes:
-            # calculate percentage complete
-            status = (f"Position: {(devpos+blocksize):,} ("
-                f"{((devpos+blocksize) / devsize):.3%})  State: {TRMGRN}O"
-                f"{TRMBNORM}  TTC: {etatime} @ "
-                f"{((devpos+blocksize) / runtime / 1024 / 1024):0.2f} MBps ("
-                f"{blockwrites:,} blocks written){TRMCLR}\r")
-            sys.stdout.write(status)
-        else:
-            # block is not nulled - rewind blocksize and re-write
-            devpos = os.lseek(block, -blocksize, os.SEEK_CUR)
-            # write nulls
-            os.write(block, nullbytes)
-            blockwrites += 1
-            # calculate percentage complete
-            status = (f"Position: {(devpos+blocksize):,} ("
-                f"{((devpos+blocksize) / devsize):.3%})  State: {TRMRED}X"
-                f"{TRMBNORM}  TTC: {etatime} @ "
-                f"{((devpos+blocksize) / runtime / 1024 / 1024):0.2f} MBps ("
-                f"{blockwrites:,} blocks written){TRMCLR}\r")
-            sys.stdout.write(status)
-    # sync all writes
-    sys.stdout.write("\n Syncing...\r")
+    with Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[green]{task.fields[mbps]:.2f} MB/s"),
+        TextColumn("[yellow]{task.fields[writes]} rewrites"),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task("Smart wipe", total=devsize, mbps=0.0, writes=0)
+
+        for _ in range(0, devsize, blocksize):
+            devpos = os.lseek(block, 0, os.SEEK_CUR)
+            if devpos + blocksize > devsize:
+                blocksize = devsize - devpos
+                nullbytes = bytes(blocksize)
+            bytesin = os.read(block, blocksize)
+            runtime = time.time() - starttime
+            mbps = (devpos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
+
+            if bytesin != nullbytes:
+                devpos = os.lseek(block, -blocksize, os.SEEK_CUR)
+                os.write(block, nullbytes)
+                blockwrites += 1
+
+            progress.update(task, completed=devpos + blocksize, mbps=mbps, writes=blockwrites)
+
+    console.print("\n[dim]Syncing...[/]", end="\r")
     os.sync()
-    # flush the cache
     flushcaches()
-    # at the end gof the write pass show the elapsed time on the command line
-    runtime = (time.time() - starttime)
-    runtimesec = math.floor(runtime)
-    runtimefmt = str(datetime.timedelta(seconds=runtimesec))
-    status = (f"Checked:  {(devpos+blocksize):,} ("
-        f"{((devpos+blocksize) / devsize):.3%})  State: {TRMGRN}-{TRMBNORM}"
-        f"  RT:  {runtimefmt} @ "
-        f"{((devpos+blocksize) / runtime / 1024 / 1024):0.2f} MBps ("
-        f"{blockwrites} blocks written){TRMCLR}\n")
-    sys.stdout.write(status)
-    logging(logfile, f"{str(status).strip()}")
-    logging(logfile, "Clean. Single pass overwriting non-clear sectors with "
-        "nulls. Not verified.")
+
+    runtime = time.time() - starttime
+    runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
+    mbps = (devpos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
+    summary = (f"Smart wipe complete. {devpos + blocksize:,} bytes checked. "
+               f"{blockwrites} blocks rewritten. {runtimefmt} @ {mbps:.2f} MB/s")
+    console.print(f"[bold green]✓[/] {summary}")
+    logging(logfile, summary)
+    logging(logfile, "Clean. Single pass overwriting non-clear sectors with nulls. Not verified.")
+
+
 
 def flushcaches():
     '''
@@ -139,9 +123,8 @@ def wipefail(block, position, blocksize, pattern, logfile):
     (bad sector / I/O error), logs the failure and exits rather than
     silently continuing over unwritable media.
     '''
-    print("\nWrite failed at position", position, "- attempting rewrite")
+    console.print(f"\n[bold yellow]⚠ Write mismatch at position {position:,} — attempting rewrite...[/]")
     logging(logfile, f"Write failure detected in block at {position} - rewrite attempted")
-    # attempt rewipe the failed block
     if pattern == "00":
         bytepattern = bytes(blocksize)
     else:
@@ -155,74 +138,83 @@ def wipefail(block, position, blocksize, pattern, logfile):
         bytesin = os.read(block, blocksize)
     except OSError as exc:
         msg = f"I/O error during rewrite at position {position}: {exc}"
-        print(TRMRED + "\n" + msg + TRMBNORM)
+        console.print(f"[bold red]✗ {msg}[/]")
         logging(logfile, msg)
         logging(logfile, "Exiting due to I/O error.")
         sys.exit(1)
     if bytesin != bytepattern:
-        msg = f"Re-write attempt failed at position {position} - sector may be bad."
-        print(TRMRED + "\n" + msg + TRMBNORM)
+        msg = f"Re-write attempt failed at position {position} — sector may be bad."
+        console.print(f"[bold red]✗ {msg}[/]")
         logging(logfile, msg)
         logging(logfile, "Exiting.")
         sys.exit(1)
-    # rewrite succeeded - return and continue
     return
 
 def drivemap(block, blocksize, devsize, logfile):
     '''
     --check / -c
-    quick mapping of the data on the drive for stats
+    Quick mapping of the data on the drive for stats.
     '''
     logging(logfile, "Drive mapping started")
     cleancount = 0
     dirtycount = 0
-    keepmapping = 0
+    keepmapping = False
     nullbytes = bytes(blocksize)
     os.lseek(block, 0, os.SEEK_SET)
     flushcaches()
-    #starttime = time.time() # reset the clock
-    for dev_pos in range(0, (devsize), blocksize):
-        if dev_pos+blocksize > (devsize):
-            # taking care of the last block if it's past the end
-            blocksize = (devsize)-dev_pos
-            nullbytes = bytes(blocksize)
-        bytesin = os.read(block,blocksize)
-        if bytesin == nullbytes:
-            cleancount = cleancount + blocksize
-        else:
-            dirtycount = dirtycount + blocksize
-            # drive is dirty - see if we should continue mapping
-            if keepmapping == 0:
-                logging(logfile, f"Non-clear sectors found in block starting at {dev_pos:,}")
-                check = input("Non-clear sectors found in block starting at " +
-                    str(dev_pos) + ". Continue? (y/n) ")
-                if check.lower() == "y":
-                    keepmapping = 1
-                    logging(logfile, "User chose to continue mapping.")
-                else:
-                    print(TRMRED + "Drive is not clear. Exiting." + TRMBNORM)
-                    logging(logfile, "User chose to terminate mapping.")
-                    logging(logfile, "Drive mapped. Drive is dirty and contains non-clear sectors.")
-                    logging(logfile, "Exiting.")
-                    sys.exit()
 
-        percentdone = f"{((dev_pos+blocksize) / devsize):.3%}"
-        # calc percent dirty / clean
-        cleanpct = f"{(cleancount / devsize):.3%}"
-        dirtypct = f"{(dirtycount / devsize):.3%}"
-        position = f"{(dev_pos+blocksize):,}"
-        status = (f"Mapping: {position} ({percentdone})  Dirty: {TRMRED}"
-            f"{dirtypct} {TRMBNORM}Clean: {TRMGRN}{cleanpct}{TRMBNORM}{TRMCLR}\r")
-        sys.stdout.write(status)
-    sys.stdout.write("\n")
+    with Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[green]Clean: {task.fields[cleanpct]}"),
+        TextColumn("[red]Dirty: {task.fields[dirtypct]}"),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task("Drive map", total=devsize, cleanpct="0.000%", dirtypct="0.000%")
+
+        for dev_pos in range(0, devsize, blocksize):
+            if dev_pos + blocksize > devsize:
+                blocksize = devsize - dev_pos
+                nullbytes = bytes(blocksize)
+            bytesin = os.read(block, blocksize)
+
+            if bytesin == nullbytes:
+                cleancount += blocksize
+            else:
+                dirtycount += blocksize
+                if not keepmapping:
+                    progress.stop()
+                    logging(logfile, f"Non-clear sectors found in block starting at {dev_pos:,}")
+                    console.print(f"\n[bold yellow]⚠ Non-clear sectors found at position {dev_pos:,}[/]")
+                    check = console.input("[bold]Continue mapping? [y/N][/] ")
+                    if check.strip().lower() == "y":
+                        keepmapping = True
+                        logging(logfile, "User chose to continue mapping.")
+                        progress.start()
+                    else:
+                        console.print("[bold red]Drive is not clear. Exiting.[/]")
+                        logging(logfile, "User chose to terminate mapping.")
+                        logging(logfile, "Drive mapped. Drive is dirty and contains non-clear sectors.")
+                        sys.exit()
+
+            cleanpct = f"{cleancount / devsize:.3%}"
+            dirtypct = f"{dirtycount / devsize:.3%}"
+            progress.update(task, completed=dev_pos + blocksize,
+                            cleanpct=cleanpct, dirtypct=dirtypct)
+
+    console.print()
     if dirtycount == 0:
-        print(TRMGRN + "Drive is clear and only contains 0x00." + TRMBNORM)
+        console.print("[bold green]✓ Drive is clear and only contains 0x00.[/]")
         logging(logfile, "Drive mapped. Drive is clear and only contains 0x00.")
-        return
-    print(TRMRED + "Drive is not clear." + TRMBNORM)
-    logging(logfile, f"Drive mapped. Drive is dirty and contains non-nulled "
-        f"data. {cleanpct} clean and {dirtypct} dirty ({dirtycount:,} bytes).")
-    return
+    else:
+        console.print("[bold red]✗ Drive is not clear.[/]")
+        logging(logfile, f"Drive mapped. Drive is dirty and contains non-nulled "
+            f"data. {cleanpct} clean and {dirtypct} dirty ({dirtycount:,} bytes).")
+
+
 
 def command_line(cmd, cmdtimeout=None):
     '''
@@ -251,199 +243,179 @@ def atasecure(devname, logfile):
     hdparm --user-master user --security-set-pass NULL <device>
     '''
     logging(logfile, "Performing ATA Secure Erase on drive.")
-    hdpcheck = command_line(['which','hdparm'])
+    hdpcheck = command_line(['which', 'hdparm'])
     if hdpcheck == b'':
+        console.print("[bold red]ERROR: hdparm utility not found. Exiting.[/]")
         logging(logfile, "ERROR: hdparm utility not found. Exiting.")
-        sys.exit("ERROR: hdparm utility not found. Exiting.")
-    # get current drive status
-    hdpi = command_line(['hdparm','-I', devname]).decode(errors='replace')
-    if re.search('not\tsupported: enhanced erase', hdpi):
-        # 	not\tsupported: enhanced erase
+        sys.exit(1)
+    hdpi = command_line(['hdparm', '-I', devname]).decode(errors='replace')
+    if re.search(r'not\tsupported: enhanced erase', hdpi):
+        console.print("[bold red]ERROR: ATA Secure Erase not supported for this device. Exiting.[/]")
         logging(logfile, "ERROR: ATA Secure Erase not supported for this device. Exiting.")
-        sys.exit("ERROR: ATA Secure Erase not supported for this device. Exiting.")
-    if not re.search('(not\tfrozen)', hdpi):
+        sys.exit(1)
+    if not re.search(r'not\tfrozen', hdpi):
+        console.print("[bold red]ERROR: Drive is currently frozen. Exiting.[/]")
         logging(logfile, "ERROR: Drive is currently frozen. Exiting.")
-        sys.exit("ERROR: Drive is currently frozen. Exiting.")
-    if not re.search('(not\tlocked)', hdpi):
+        sys.exit(1)
+    if not re.search(r'not\tlocked', hdpi):
+        console.print("[bold red]ERROR: Drive is currently locked. Exiting.[/]")
         logging(logfile, "ERROR: Drive is currently locked. Exiting.")
-        sys.exit("ERROR: Drive is currently locked. Exiting.")
-    # get time to secure-erase drive
-    setime = re.search('([0-9]+min for ENHANCED SECURITY ERASE)', hdpi).group(1)
+        sys.exit(1)
+    setime = re.search(r'([0-9]+min for ENHANCED SECURITY ERASE)', hdpi).group(1)
+    console.print(f"[cyan]Drive reports {setime}[/]")
     logging(logfile, f"Drive reports {setime}")
-    print('Drive reports ' + setime)
-    # enable security - set password
-    command_line(['hdparm', '--user-master', 'user', '--security-set-pass',
-        'pass', devname]).decode()
+    command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname])
     logging(logfile, "ATA password set to 'pass'")
-    # send erase command
     logging(logfile, "ATA Secure Erase command sent")
-    command_line(['hdparm', '--user-master', 'user', '--security-erase-enhanced',
-        'pass', devname]).decode()
+    command_line(['hdparm', '--user-master', 'user', '--security-erase-enhanced', 'pass', devname])
     logging(logfile, "ATA Secure Erase completed")
-    # erase password
-    command_line(['hdparm', '--user-master', 'user', '--security-set-pass',
-        'NULL', devname]).decode()
+    command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'NULL', devname])
     logging(logfile, "ATA password removed.")
-    # disable security
-    command_line(['hdparm', '--user-master', 'user', '--security-disable',
-        'NULL', devname]).decode()
+    command_line(['hdparm', '--user-master', 'user', '--security-disable', 'NULL', devname])
     logging(logfile, "ATA security disabled")
-    print("ATA Secure Erase completed.")
+    console.print("[bold green]✓ ATA Secure Erase completed.[/]")
     logging(logfile, "ATA Secure Erase completed.")
-    # we can't call this 'clean' or 'clear' because it may not be zeroes
+    # note: we can't call this 'clean' or 'clear' because the pattern may not be zeroes
 
 def ataerase(devname, logfile):
     '''
     # call hdparm and ATA Erase (null) the drive
     '''
     logging(logfile, "Performing ATA Erase on drive.")
-    hdpcheck = command_line(['which','hdparm'])
+    hdpcheck = command_line(['which', 'hdparm'])
     if hdpcheck == b'':
+        console.print("[bold red]ERROR: hdparm utility not found. Exiting.[/]")
         logging(logfile, "ERROR: hdparm utility not found. Exiting.")
-        sys.exit("ERROR: hdparm utility not found. Exiting.")
-    # get current drive status
-    hdpi = command_line(['hdparm','-I', devname]).decode(errors='replace')
+        sys.exit(1)
+    hdpi = command_line(['hdparm', '-I', devname]).decode(errors='replace')
     if not re.search(r'(?<!not\t)supported: enhanced erase', hdpi):
+        console.print("[bold red]ERROR: ATA Erase not supported for this device. Exiting.[/]")
         logging(logfile, "ERROR: ATA Erase not supported for this device. Exiting.")
-        sys.exit("ERROR: ATA Erase not supported for this device. Exiting.")
-    if not re.search('(not\tfrozen)', hdpi):
+        sys.exit(1)
+    if not re.search(r'not\tfrozen', hdpi):
+        console.print("[bold red]ERROR: Drive is currently frozen. Exiting.[/]")
         logging(logfile, "ERROR: Drive is currently frozen. Exiting.")
-        sys.exit("ERROR: Drive is currently frozen. Exiting.")
-    if not re.search('(not\tlocked)', hdpi):
+        sys.exit(1)
+    if not re.search(r'not\tlocked', hdpi):
+        console.print("[bold red]ERROR: Drive is currently locked. Exiting.[/]")
         logging(logfile, "ERROR: Drive is currently locked. Exiting.")
-        sys.exit("ERROR: Drive is currently locked. Exiting.")
-    # get time to secure-erase drive
-    setime = re.search('([0-9]+min for SECURITY ERASE)', hdpi).group(1)
-    print('Drive reports ' + setime)
+        sys.exit(1)
+    setime = re.search(r'([0-9]+min for SECURITY ERASE)', hdpi).group(1)
+    console.print(f"[cyan]Drive reports {setime}[/]")
     logging(logfile, f"Drive reports {setime}")
-    # enable security - set password
-    command_line(['hdparm', '--user-master', 'user', '--security-set-pass',
-        'pass', devname]).decode()
-    logging(logfile, "ATA passsword set to 'pass'")
-    # run erase command
+    command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'pass', devname])
+    logging(logfile, "ATA password set to 'pass'")
     logging(logfile, "ATA Erase command sent")
-    command_line(['hdparm', '--user-master', 'user', '--security-erase',
-        'pass', devname]).decode()
+    command_line(['hdparm', '--user-master', 'user', '--security-erase', 'pass', devname])
     logging(logfile, "ATA Erase command completed")
-    # remove password
-    command_line(['hdparm', '--user-master', 'user', '--security-set-pass',
-        'NULL', devname]).decode()
-    logging(logfile,"ATA password removed")
-    # disable security
-    command_line(['hdparm', '--user-master', 'user',
-        '--security-disable', 'NULL', devname]).decode()
+    command_line(['hdparm', '--user-master', 'user', '--security-set-pass', 'NULL', devname])
+    logging(logfile, "ATA password removed")
+    command_line(['hdparm', '--user-master', 'user', '--security-disable', 'NULL', devname])
     logging(logfile, "ATA Security disabled.")
-    print("ATA Secure Erase completed.")
-    logging(logfile, "ATA Secure Erase completed.")
-    # we can't call this 'clean' or 'clear' because it may not be zeroes
+    console.print("[bold green]✓ ATA Erase completed.[/]")
+    logging(logfile, "ATA Erase completed.")
+    # note: we can't call this 'clean' or 'clear' because the pattern may not be zeroes
 
 def writeloop(block, blocksize, devsize, pattern, logfile):
     '''
-    breaking out full disk writing into separate functions
+    Full disk write pass — writes a single byte pattern across the entire device.
     '''
     logging(logfile, f"Writing 0x{pattern} to drive.")
-    if pattern=="00":
-        writepattern = bytes(blocksize)
-    else:
-        writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
-    os.lseek(block, 0, os.SEEK_SET)
-    starttime = time.time() # reset the clock
-    for dev_pos in range(0, (devsize), blocksize):
-        if dev_pos+blocksize > (devsize):
-            # taking care of the last block if it's past the end
-            blocksize = (devsize)-dev_pos
-            if pattern=="00":
-                writepattern = bytes(blocksize)
-            else:
-                writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
-        # calc runtime
-        runtime = (time.time() - starttime)
-        # calc time remaining
-        if runtime > 0 and dev_pos > 0:
-            etasec = math.floor((devsize - dev_pos) / ((dev_pos+blocksize) / runtime))
-            etatime = str(datetime.timedelta(seconds=etasec))
-        else:
-            etatime = "-:--:--"
-        #writing pattern
-        try:
-            os.write(block, writepattern)
-        except OSError as exc:
-            msg = f"I/O write error at position {dev_pos}: {exc}"
-            print(TRMRED + "\n" + msg + TRMBNORM)
-            logging(logfile, msg)
-            logging(logfile, "Exiting due to I/O error.")
-            sys.exit(1)
-        mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
-        status = (f"Writing 0x{pattern}: {(dev_pos+blocksize):,} ("
-            f"{((dev_pos+blocksize) / devsize):.3%})  State: {TRMRED}{pattern}"
-            f"{TRMBNORM}  TTC: {etatime} @ "
-            f"{mbps:0.2f} MBps{TRMCLR}"
-            f"\r")
-        sys.stdout.write(status)
-
-    # at the end of the write pass show the elapsed time on the command line
-    runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
-    status = (f"Wrote 0x{pattern}: {(dev_pos+blocksize):,} ("
-        f"{((dev_pos+blocksize) / devsize):.3%})  State: {TRMGRN}--"
-        f"{TRMBNORM}  ET: {runtimefmt} @ "
-        f"{((dev_pos+blocksize) / runtime / 1024 / 1024):0.2f} MBps{TRMCLR}\r")
-    logging(logfile, status.strip())
-
-def readloop(block, blocksize, devsize, pattern, logfile):
-    '''
-    breaking out full disk verification into separate functions
-    '''
-    logging(logfile, f"Verifying 0x{pattern} on drive.")
-    if pattern=="00":
+    color = "red" if pattern == "FF" else "cyan"
+    if pattern == "00":
         writepattern = bytes(blocksize)
     else:
         writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time()
-    for dev_pos in range(0, (devsize), blocksize):
-        if dev_pos+blocksize > (devsize):
-            # taking care of the last block if it's past the end
-            blocksize = (devsize)-dev_pos
-            if pattern=="00":
-                writepattern = bytes(blocksize)
-            else:
-                writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
-        # calc runtime
-        runtime = (time.time() - starttime)
-        # calc time remaining
-        if runtime > 0 and dev_pos > 0:
-            etasec = math.floor((devsize - dev_pos) / (dev_pos / runtime))
-            etatime = str(datetime.timedelta(seconds=etasec))
-        else:
-            etatime = "-:--:--"
 
-        #reading and verifying
-        try:
-            bytesin = os.read(block, blocksize)
-        except OSError as exc:
-            msg = f"I/O read error at position {dev_pos}: {exc}"
-            print(TRMRED + "\n" + msg + TRMBNORM)
-            logging(logfile, msg)
-            logging(logfile, "Exiting due to I/O error.")
-            sys.exit(1)
-        if bytesin != writepattern:
-            # this write fails - throw an error and stop
-            wipefail(block, dev_pos, blocksize, pattern, logfile)
-        runtime = (time.time() - starttime)
-        mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
-        status = (f"Verifying 0x{pattern}: {(dev_pos+blocksize):,} ("
-            f"{((dev_pos+blocksize) / devsize):.3%})  State: {TRMGRN}"
-            f"{pattern}{TRMBNORM}  TTC: {etatime} @ "
-            f"{mbps:0.2f} MBps"
-            f"{TRMCLR}\r")
-        sys.stdout.write(status)
+    with Progress(
+        TextColumn(f"[bold {color}]Write 0x{pattern}[/]"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[dim]{task.fields[mbps]:.2f} MB/s"),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task(f"Write 0x{pattern}", total=devsize, mbps=0.0)
+        for dev_pos in range(0, devsize, blocksize):
+            if dev_pos + blocksize > devsize:
+                blocksize = devsize - dev_pos
+                if pattern == "00":
+                    writepattern = bytes(blocksize)
+                else:
+                    writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
+            try:
+                os.write(block, writepattern)
+            except OSError as exc:
+                msg = f"I/O write error at position {dev_pos}: {exc}"
+                console.print(f"[bold red]✗ {msg}[/]")
+                logging(logfile, msg)
+                logging(logfile, "Exiting due to I/O error.")
+                sys.exit(1)
+            runtime = time.time() - starttime
+            mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
+            progress.update(task, completed=dev_pos + blocksize, mbps=mbps)
+
+    runtime = time.time() - starttime
+    mbps = devsize / runtime / 1024 / 1024 if runtime > 0 else 0.0
     runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
-    status = (f"Verified 0x{pattern}: {(dev_pos+blocksize):,} ("
-        f"{((dev_pos+blocksize) / devsize):.3%})  State: {TRMGRN}--"
-        f"{TRMBNORM}  ET: {runtimefmt} @ "
-        f"{((dev_pos+blocksize) / runtime / 1024 / 1024):0.2f} MBps{TRMCLR}\r")
-    logging(logfile, status.strip())
-    print()
+    summary = f"Wrote 0x{pattern}: {devsize:,} bytes in {runtimefmt} @ {mbps:.2f} MB/s"
+    console.print(f"[bold green]✓[/] {summary}")
+    logging(logfile, summary)
+
+def readloop(block, blocksize, devsize, pattern, logfile):
+    '''
+    Full disk verify pass — reads back every block and checks against expected pattern.
+    '''
+    logging(logfile, f"Verifying 0x{pattern} on drive.")
+    if pattern == "00":
+        writepattern = bytes(blocksize)
+    else:
+        writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
+    os.lseek(block, 0, os.SEEK_SET)
+    starttime = time.time()
+
+    with Progress(
+        TextColumn("[bold green]Verify 0x{task.fields[pat]}[/]"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[dim]{task.fields[mbps]:.2f} MB/s"),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task(f"Verify 0x{pattern}", total=devsize, mbps=0.0, pat=pattern)
+        for dev_pos in range(0, devsize, blocksize):
+            if dev_pos + blocksize > devsize:
+                blocksize = devsize - dev_pos
+                if pattern == "00":
+                    writepattern = bytes(blocksize)
+                else:
+                    writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
+            try:
+                bytesin = os.read(block, blocksize)
+            except OSError as exc:
+                msg = f"I/O read error at position {dev_pos}: {exc}"
+                console.print(f"[bold red]✗ {msg}[/]")
+                logging(logfile, msg)
+                logging(logfile, "Exiting due to I/O error.")
+                sys.exit(1)
+            if bytesin != writepattern:
+                wipefail(block, dev_pos, blocksize, pattern, logfile)
+            runtime = time.time() - starttime
+            mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
+            progress.update(task, completed=dev_pos + blocksize, mbps=mbps)
+
+    runtime = time.time() - starttime
+    mbps = devsize / runtime / 1024 / 1024 if runtime > 0 else 0.0
+    runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
+    summary = f"Verified 0x{pattern}: {devsize:,} bytes in {runtimefmt} @ {mbps:.2f} MB/s"
+    console.print(f"[bold green]✓[/] {summary}")
+    logging(logfile, summary)
+
+
 
 def fulltest(block, blocksize, devsize, logfile):
     '''
@@ -457,20 +429,16 @@ def fulltest(block, blocksize, devsize, logfile):
 
     # write ones to disk first
     writeloop(block, blocksize, devsize, "FF", logfile)
-    # sync all writes
-    sys.stdout.write("\nSyncing...\r")
+    console.print("[dim]Syncing...[/]")
     os.sync()
-    # flush the cache
     flushcaches()
 
     readloop(block, blocksize, devsize, "FF", logfile)
 
     writeloop(block, blocksize, devsize, "00", logfile)
 
-    # sync all writes
-    sys.stdout.write("\nSyncing...\r")
+    console.print("[dim]Syncing...[/]")
     os.sync()
-    # flush the cache
     flushcaches()
 
     readloop(block, blocksize, devsize, "00", logfile)
@@ -489,69 +457,65 @@ def singlepass(block, blocksize, devsize, logfile):
 
     writeloop(block, blocksize, devsize, "00", logfile)
 
-    # sync all writes
-    sys.stdout.write("\nSyncing...\r")
+    console.print("[dim]Syncing...[/]")
     os.sync()
-    # Then read back every block and verify - if there are any mismatches, die.
-    # flush the cache
     flushcaches()
 
     readloop(block, blocksize, devsize, "00", logfile)
 
     logging(logfile, "Single-pass null and verify completed. Drive is clear.")
 
-def hidecursor():
-    '''
-    terminal escape codes to hide the cursor
-    '''
-    sys.stdout.write("\033[?25l")
-    sys.stdout.flush()
-
-def showcursor():
-    '''
-    terminal escape codes to unhide the cursor
-    '''
-    sys.stdout.write("\033[?25h")
-    sys.stdout.flush()
-
 def rootcheck():
     '''
     make sure we are running as root
     '''
     if os.getuid() != 0:
-        print("Error: This program must be run as root. Exiting.")
-        showcursor()
-        sys.exit()
+        console.print("[bold red]Error: This program must be run as root. Exiting.[/]")
+        sys.exit(1)
 
 def cleanup():
     '''
-    things we need to do on exit
+    Ensure terminal is restored on any exit path.
+    Rich handles cursor management during Progress blocks,
+    but we restore it explicitly here as a final safety net.
     '''
-    showcursor()
+    # Raw escape intentional here — runs outside any rich context on exit
+    sys.stdout.write("\033[?25h")
+    sys.stdout.flush()
+
 
 def prettyheader(devname, devsize, blocksize, logfile):
     '''
-    command line splash of color
+    Styled startup banner using rich Panel and Table.
     '''
-    print(f"{TRMYEL}  , _ ,")
-    print(" ( o o )")
-    print("/'` ' `'\\")
-    print("|'''''''|")
-    print("|\\\\'''//|")
-    print(f"   \"\"\"{TRMBNORM}")
-    print("O.W.L. - Optimized Wipe and Logging - Forensic Media Sterilization "
-        "Utility")
-    print(f"Device: {devname}")
-    print(f"Device size: {devsize:,} bytes")
-    print(f"Block size set to {blocksize:,} bytes")
-    logging(logfile, f"{('=' * 80)}")
-    logging(logfile,
-        "O.W.L. - Optimized Wipe and Logging - Forensic Media Sterilization "
-        "Utility")
-    logging(logfile, f"Command: {' '.join(sys.argv[0:])}")
+    owl = Text()
+    owl.append("   , _ ,\n", style="bold yellow")
+    owl.append("  ( o o )\n", style="bold yellow")
+    owl.append(" /'` ' `'\\\n", style="bold yellow")
+    owl.append(" |'''''''|\n", style="bold yellow")
+    owl.append(" |\\'''//|\n\n", style="bold yellow")
+    owl.append("O.W.L.", style="bold white")
+    owl.append(" — Optimized Wipe and Logging\n", style="white")
+    owl.append("Forensic Media Sterilization Utility", style="dim")
+
+    info = Table.grid(padding=(0, 2))
+    info.add_column(style="bold cyan", justify="right")
+    info.add_column(style="white")
+    info.add_row("Device:", devname)
+    info.add_row("Size:", f"{devsize:,} bytes  ({devsize / 1024 / 1024 / 1024:.2f} GiB)")
+    info.add_row("Block size:", f"{blocksize:,} bytes")
+
+    console.print(Panel.fit(owl, border_style="yellow", padding=(0, 2)))
+    console.print(info)
+    console.print()
+
+    logging(logfile, "=" * 80)
+    logging(logfile, "O.W.L. - Optimized Wipe and Logging - Forensic Media Sterilization Utility")
+    logging(logfile, f"Command: {' '.join(sys.argv)}")
     logging(logfile, f"Device: {devname}")
     logging(logfile, f"Device size: {devsize:,} bytes")
     logging(logfile, f"Block size set to {blocksize:,} bytes")
+
 
 def parse_arguments():
     '''
@@ -601,28 +565,32 @@ def diskinfo(devname, logfile):
         filters = { 'name' : devname[5:] } # trim /dev/ to make shortname 'sdx'
         disks = blk.get_disks(filters)
         if not disks:
-            print(TRMYEL + "Warning: Device not found in block device list "
-                "(blkinfo). Skipping disk info." + TRMBNORM)
-            logging(logfile, "Warning: Device not recognized by blkinfo - "
-                "disk info skipped.")
+            console.print("[yellow]Warning: Device not found in block device list "
+                "(blkinfo). Skipping disk info.[/]")
+            logging(logfile, "Warning: Device not recognized by blkinfo - disk info skipped.")
             return
         blkdata = disks[0]
-    except Exception as exc:  # blkinfo can raise various errors on odd devices
-        print(TRMYEL + f"Warning: Could not retrieve disk info: {exc}" + TRMBNORM)
+    except Exception as exc:
+        console.print(f"[yellow]Warning: Could not retrieve disk info: {exc}[/]")
         logging(logfile, f"Warning: Could not retrieve disk info: {exc}")
         return
 
-    print(f"Model: {blkdata['model']}")
+    info = Table.grid(padding=(0, 2))
+    info.add_column(style="bold cyan", justify="right")
+    info.add_column(style="white")
+    info.add_row("Model:", str(blkdata['model']))
+    info.add_row("Vendor:", str(blkdata['vendor']))
+    info.add_row("Serial:", str(blkdata['serial']))
+    info.add_row("Transport:", str(blkdata['tran']))
+    console.print(info)
+
     logging(logfile, f"Model: {blkdata['model']}")
-    print(f"Vendor: {blkdata['vendor']}")
     logging(logfile, f"Vendor: {blkdata['vendor']}")
-    print(f"Serial: {blkdata['serial']}")
     logging(logfile, f"Serial: {blkdata['serial']}")
-    print(f"Transport: {blkdata['tran']}")
     logging(logfile, f"Transport: {blkdata['tran']}")
 
     if mountcheck(blkdata, logfile, 0) > 0:
-        print("Exiting.")
+        console.print("[bold red]Device has mounted partitions. Exiting.[/]")
         logging(logfile, "Exiting.")
         sys.exit()
 
@@ -639,61 +607,56 @@ def mountcheck(blkdata, logfile, mountct):
             for child in value:
                 mountct=mountcheck(child, logfile, mountct)
         elif key == 'mountpoint' and value != '':
-            print(f"Device has a partition mounted at {value}")
+            console.print(f"[bold red]⚠ Device has a partition mounted at {value}[/]")
             logging(logfile, f"Device has a partition mounted at {value}")
             mountct += 1
     return mountct
 
 def main():
     '''
-    docstrings about main keep linters happy. This is main.
+    Entry point. Parses arguments, opens the device, and dispatches to the
+    appropriate wipe/check function.
     '''
     args = parse_arguments()
 
     devname = os.path.abspath(args.target[0])
     if not os.path.exists(devname):
-        print("ERROR: Target device ", devname, "not found.")
+        console.print(f"[bold red]ERROR: Target device {devname} not found.[/]")
         sys.exit(1)
 
     logfile = args.logfile  # None if not provided by user
 
     atexit.register(cleanup)
-    # calling main functions here - need to do this with arguments eventually
     rootcheck()
-    hidecursor()
 
     # direct access to disk to bypass cache, sync writes
     try:
         block = os.open(devname, os.O_RDWR | os.O_SYNC)
     except PermissionError:
-        print(TRMRED + f"ERROR: Permission denied opening {devname}. "
-            "Are you running as root?" + TRMBNORM)
+        console.print(f"[bold red]ERROR: Permission denied opening {devname}. "
+            "Are you running as root?[/]")
         logging(logfile, f"ERROR: Permission denied opening {devname}.")
         sys.exit(1)
     except OSError as exc:
-        print(TRMRED + f"ERROR: Could not open {devname}: {exc}" + TRMBNORM)
+        console.print(f"[bold red]ERROR: Could not open {devname}: {exc}[/]")
         logging(logfile, f"ERROR: Could not open {devname}: {exc}")
         sys.exit(1)
-    # figure out the total size of the target
+
     devsize = os.lseek(block, 0, os.SEEK_END)
-    # seek back to the beginning
     os.lseek(block, 0, os.SEEK_SET)
 
-    # user has the option to override
     if args.blocksize:
         try:
             blocksize = int(args.blocksize)
             if blocksize <= 0:
                 raise ValueError
         except ValueError:
-            print(TRMRED + "ERROR: --blocksize must be a positive integer." + TRMBNORM)
+            console.print("[bold red]ERROR: --blocksize must be a positive integer.[/]")
             sys.exit(1)
     else:
-        # set default blocksize to 1MB = 4096*256
-        blocksize = 4096 * 256
+        blocksize = 4096 * 256  # default 1MB
 
     prettyheader(devname, devsize, blocksize, logfile)
-
     diskinfo(devname, logfile)
 
     if args.check:
@@ -710,8 +673,6 @@ def main():
         ataerase(devname, logfile)
     else:
         fulltest(block, blocksize, devsize, logfile)
-
-    showcursor()
 
     logging(logfile, "Exited")
 
