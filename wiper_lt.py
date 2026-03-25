@@ -352,7 +352,71 @@ def command_line(cmd, cmdtimeout=None):
     except subprocess.TimeoutExpired:
         return b'Timeout'
 
-def atasecure(devname, logfile):
+def check_ata_support(devname, mode, logfile):
+    '''
+    Pre-flight check for ATA erase operations. Runs hdparm -I once and
+    validates that the drive supports the requested mode, is not frozen,
+    and is not locked. Returns the decoded hdparm output on success so
+    callers can extract timing info without running hdparm a second time.
+
+    mode: "secure"  -> checks for ENHANCED SECURITY ERASE support
+          "erase"   -> checks for standard SECURITY ERASE support
+
+    Exits with a clear error message if any check fails — intended to be
+    called BEFORE the confirmation prompt so the user never confirms a
+    wipe that will immediately fail.
+    '''
+    # 1. hdparm must be installed
+    if command_line(['which', 'hdparm']) == b'':
+        console.print("[bold red]ERROR: hdparm is not installed or not in PATH. "
+            "Install hdparm and try again.[/]")
+        logging(logfile, "ERROR: hdparm utility not found.")
+        sys.exit(1)
+
+    # 2. Query the drive
+    console.print(f"[dim]Querying ATA security features on {devname}...[/]")
+    hdpi = command_line(['hdparm', '-I', devname]).decode(errors='replace')
+
+    if not hdpi:
+        console.print(f"[bold red]ERROR: hdparm returned no output for {devname}. "
+            "Is this an ATA device?[/]")
+        logging(logfile, f"ERROR: hdparm -I returned no output for {devname}.")
+        sys.exit(1)
+
+    # 3. Feature support check
+    if mode == "secure":
+        if re.search(r'not\tsupported: enhanced erase', hdpi):
+            console.print("[bold red]ERROR: ATA Enhanced Security Erase is not "
+                f"supported by {devname}.[/]")
+            console.print("[dim]Tip: Try --ataerase for standard ATA Erase instead.[/]")
+            logging(logfile, "ERROR: ATA Enhanced Security Erase not supported.")
+            sys.exit(1)
+    elif mode == "erase":
+        if not re.search(r'(?<!not\t)supported: enhanced erase', hdpi):
+            console.print(f"[bold red]ERROR: ATA Security Erase is not supported "
+                f"by {devname}.[/]")
+            logging(logfile, "ERROR: ATA Security Erase not supported.")
+            sys.exit(1)
+
+    # 4. Frozen check — a frozen drive cannot have security commands sent to it
+    if not re.search(r'not\tfrozen', hdpi):
+        console.print("[bold red]ERROR: Drive security state is 'frozen'.[/]")
+        console.print("[dim]Tip: Try a suspend/resume cycle to unfreeze the drive, "
+            "then retry.[/]")
+        logging(logfile, "ERROR: Drive is frozen — ATA erase not possible.")
+        sys.exit(1)
+
+    # 5. Locked check
+    if not re.search(r'not\tlocked', hdpi):
+        console.print("[bold red]ERROR: Drive is currently locked.[/]")
+        logging(logfile, "ERROR: Drive is locked — ATA erase not possible.")
+        sys.exit(1)
+
+    logging(logfile, f"ATA pre-flight checks passed for {devname} (mode={mode}).")
+    return hdpi
+
+
+def atasecure(devname, logfile, hdpi=None):
     '''
     call hdparm and ATA Secure-Erase the drive
     ###
@@ -365,25 +429,16 @@ def atasecure(devname, logfile):
     hdparm --user-master user --security-disable pass <device>
     hdparm --user-master user --security-set-pass NULL <device>
     '''
+def atasecure(devname, logfile, hdpi=None):
+    '''
+    ATA Secure Erase (Enhanced). Pre-flight checks are expected to have
+    been run by check_ata_support() before this is called. hdpi is the
+    decoded hdparm -I output; if not supplied it is fetched here as a
+    fallback (e.g. direct calls in testing).
+    '''
     logging(logfile, "Performing ATA Secure Erase on drive.")
-    hdpcheck = command_line(['which', 'hdparm'])
-    if hdpcheck == b'':
-        console.print("[bold red]ERROR: hdparm utility not found. Exiting.[/]")
-        logging(logfile, "ERROR: hdparm utility not found. Exiting.")
-        sys.exit(1)
-    hdpi = command_line(['hdparm', '-I', devname]).decode(errors='replace')
-    if re.search(r'not\tsupported: enhanced erase', hdpi):
-        console.print("[bold red]ERROR: ATA Secure Erase not supported for this device. Exiting.[/]")
-        logging(logfile, "ERROR: ATA Secure Erase not supported for this device. Exiting.")
-        sys.exit(1)
-    if not re.search(r'not\tfrozen', hdpi):
-        console.print("[bold red]ERROR: Drive is currently frozen. Exiting.[/]")
-        logging(logfile, "ERROR: Drive is currently frozen. Exiting.")
-        sys.exit(1)
-    if not re.search(r'not\tlocked', hdpi):
-        console.print("[bold red]ERROR: Drive is currently locked. Exiting.[/]")
-        logging(logfile, "ERROR: Drive is currently locked. Exiting.")
-        sys.exit(1)
+    if hdpi is None:
+        hdpi = command_line(['hdparm', '-I', devname]).decode(errors='replace')
     setime = re.search(r'([0-9]+min for ENHANCED SECURITY ERASE)', hdpi).group(1)
     console.print(f"[cyan]Drive reports {setime}[/]")
     logging(logfile, f"Drive reports {setime}")
@@ -400,29 +455,14 @@ def atasecure(devname, logfile):
     logging(logfile, "ATA Secure Erase completed.")
     # note: we can't call this 'clean' or 'clear' because the pattern may not be zeroes
 
-def ataerase(devname, logfile):
+def ataerase(devname, logfile, hdpi=None):
     '''
-    # call hdparm and ATA Erase (null) the drive
+    ATA Erase (standard, nulls). Pre-flight checks are expected to have
+    been run by check_ata_support() before this is called.
     '''
     logging(logfile, "Performing ATA Erase on drive.")
-    hdpcheck = command_line(['which', 'hdparm'])
-    if hdpcheck == b'':
-        console.print("[bold red]ERROR: hdparm utility not found. Exiting.[/]")
-        logging(logfile, "ERROR: hdparm utility not found. Exiting.")
-        sys.exit(1)
-    hdpi = command_line(['hdparm', '-I', devname]).decode(errors='replace')
-    if not re.search(r'(?<!not\t)supported: enhanced erase', hdpi):
-        console.print("[bold red]ERROR: ATA Erase not supported for this device. Exiting.[/]")
-        logging(logfile, "ERROR: ATA Erase not supported for this device. Exiting.")
-        sys.exit(1)
-    if not re.search(r'not\tfrozen', hdpi):
-        console.print("[bold red]ERROR: Drive is currently frozen. Exiting.[/]")
-        logging(logfile, "ERROR: Drive is currently frozen. Exiting.")
-        sys.exit(1)
-    if not re.search(r'not\tlocked', hdpi):
-        console.print("[bold red]ERROR: Drive is currently locked. Exiting.[/]")
-        logging(logfile, "ERROR: Drive is currently locked. Exiting.")
-        sys.exit(1)
+    if hdpi is None:
+        hdpi = command_line(['hdparm', '-I', devname]).decode(errors='replace')
     setime = re.search(r'([0-9]+min for SECURITY ERASE)', hdpi).group(1)
     console.print(f"[cyan]Drive reports {setime}[/]")
     logging(logfile, f"Drive reports {setime}")
@@ -1039,16 +1079,18 @@ def main():
             console.print("[yellow]⚠ --dry-run has no effect with --atasecure "
                 "(ATA commands are issued by hdparm, not OWL). Skipping.[/]")
         else:
+            hdpi = check_ata_support(devname, "secure", logfile)
             confirm_wipe(devname, devsize, operation, logfile)
-            atasecure(devname, logfile)
+            atasecure(devname, logfile, hdpi)
             record.success = True
     elif args.ataerase:
         if dry_run:
             console.print("[yellow]⚠ --dry-run has no effect with --ataerase "
                 "(ATA commands are issued by hdparm, not OWL). Skipping.[/]")
         else:
+            hdpi = check_ata_support(devname, "erase", logfile)
             confirm_wipe(devname, devsize, operation, logfile)
-            ataerase(devname, logfile)
+            ataerase(devname, logfile, hdpi)
             record.success = True
     else:
         if not dry_run:
