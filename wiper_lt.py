@@ -22,9 +22,17 @@ import re
 import subprocess
 import atexit
 import socket
+import secrets
 from dataclasses import dataclass, field
 from typing import Optional
 from blkinfo import BlkDiskInfo
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import KeepTogether
+from pypdf import PdfReader, PdfWriter
 from rich.console import Console
 from rich.progress import (
     Progress, BarColumn, TextColumn, TimeRemainingColumn,
@@ -72,77 +80,209 @@ class WipeRecord:
 
 def generate_certificate(record: WipeRecord, report_path: str, logfile):
     '''
-    Write a plain-text wipe certificate to report_path.
-    The certificate is human-readable and suitable for printing or archiving.
+    Generate a formatted PDF wipe certificate and write it to report_path.
+
+    Security model:
+      - No user password  → opens freely in any PDF reader
+      - Random owner password → editing, form-filling, and content extraction
+        are locked; viewing, copying text, and printing remain permitted
+      - The owner passphrase is printed to the terminal and logged so it can
+        be recorded if ever needed for administrative override
     '''
-    width = 72
-    border = "=" * width
+    # Ensure .pdf extension
+    if not report_path.lower().endswith('.pdf'):
+        report_path += '.pdf'
 
-    def centre(text):
-        return text.center(width)
+    tmp_path = report_path + '.tmp'
+    size_gib  = record.device_size / 1024 / 1024 / 1024
 
-    def row(label, value, indent=2):
-        label_str = f"{' ' * indent}{label:<22}"
-        return f"{label_str}{value}"
+    # --- Status string ---
+    if record.dry_run:
+        status_text  = "DRY RUN — No data written"
+        status_color = colors.orange
+    elif record.success:
+        status_text  = "COMPLETED SUCCESSFULLY"
+        status_color = colors.HexColor("#1a7a1a")
+    else:
+        status_text  = "FAILED / INCOMPLETE"
+        status_color = colors.red
 
-    size_gib = record.device_size / 1024 / 1024 / 1024
+    # --- Styles ---
+    styles = getSampleStyleSheet()
 
-    lines = [
-        border,
-        centre("O.W.L. — MEDIA STERILIZATION CERTIFICATE"),
-        centre("Optimized Wipe and Logging — Corvus Forensics LLC"),
-        border,
-        "",
-        centre("OPERATION DETAILS"),
-        "-" * width,
-        row("Operation:",        record.operation),
-        row("Status:",           "DRY RUN (no data written)" if record.dry_run
-                                 else ("COMPLETED SUCCESSFULLY" if record.success
-                                 else "FAILED / INCOMPLETE")),
-        row("Command:",          record.command),
-        row("Start time:",       record.start_time),
-        row("End time:",         record.end_time or "—"),
-        row("Operator:",         record.operator_name or "—"),
-        row("Operator host:",    record.operator_host),
-        "",
-        centre("DEVICE DETAILS"),
-        "-" * width,
-        row("Device path:",      record.device_path),
-        row("Size (bytes):",     f"{record.device_size:,}"),
-        row("Size (GiB):",       f"{size_gib:.2f} GiB"),
-        row("Block size:",       f"{record.block_size:,} bytes"),
-        row("Model:",            record.model),
-        row("Vendor:",           record.vendor),
-        row("Serial:",           record.serial),
-        row("Transport:",        record.transport),
-        "",
-    ]
+    title_style = ParagraphStyle(
+        'CertTitle',
+        parent=styles['Title'],
+        fontSize=18,
+        textColor=colors.HexColor("#1a1a2e"),
+        spaceAfter=4,
+    )
+    subtitle_style = ParagraphStyle(
+        'CertSubtitle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.HexColor("#555555"),
+        alignment=1,  # centre
+        spaceAfter=16,
+    )
+    section_style = ParagraphStyle(
+        'SectionHead',
+        parent=styles['Heading2'],
+        fontSize=11,
+        textColor=colors.HexColor("#1a1a2e"),
+        spaceBefore=14,
+        spaceAfter=6,
+        borderPad=2,
+    )
+    status_style = ParagraphStyle(
+        'Status',
+        parent=styles['Normal'],
+        fontSize=13,
+        textColor=status_color,
+        fontName='Helvetica-Bold',
+        alignment=1,
+        spaceBefore=6,
+        spaceAfter=6,
+    )
+    footer_style = ParagraphStyle(
+        'Footer',
+        parent=styles['Normal'],
+        fontSize=8,
+        textColor=colors.HexColor("#888888"),
+        alignment=1,
+        spaceBefore=20,
+    )
 
+    def info_table(rows):
+        '''Build a two-column label/value table for a section.'''
+        tdata = [[Paragraph(f'<b>{label}</b>', styles['Normal']),
+                  Paragraph(str(value), styles['Normal'])]
+                 for label, value in rows]
+        t = Table(tdata, colWidths=[2.2 * inch, 4.2 * inch])
+        t.setStyle(TableStyle([
+            ('FONTSIZE',    (0, 0), (-1, -1), 9),
+            ('TOPPADDING',  (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('ROWBACKGROUNDS', (0, 0), (-1, -1),
+             [colors.HexColor("#f5f5f5"), colors.white]),
+            ('TEXTCOLOR',   (0, 0), (0, -1), colors.HexColor("#444444")),
+            ('TEXTCOLOR',   (1, 0), (1, -1), colors.HexColor("#111111")),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('LINEBELOW',   (0, -1), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ]))
+        return t
+
+    # --- Build story ---
+    story = []
+
+    # Header
+    story.append(Paragraph("O.W.L.", title_style))
+    story.append(Paragraph(
+        "Optimized Wipe and Logging &mdash; Forensic Media Sterilization Certificate",
+        subtitle_style))
+    story.append(HRFlowable(width="100%", thickness=2,
+                             color=colors.HexColor("#1a1a2e"), spaceAfter=10))
+
+    # Status banner
+    story.append(Paragraph(status_text, status_style))
+    story.append(HRFlowable(width="100%", thickness=1,
+                             color=colors.HexColor("#cccccc"), spaceAfter=6))
+
+    # Operation details
+    story.append(Paragraph("Operation Details", section_style))
+    story.append(info_table([
+        ("Operation",     record.operation),
+        ("Command",       record.command),
+        ("Start time",    record.start_time),
+        ("End time",      record.end_time or "—"),
+        ("Operator",      record.operator_name or "—"),
+        ("Operator host", record.operator_host),
+    ]))
+
+    # Device details
+    story.append(Paragraph("Device Details", section_style))
+    story.append(info_table([
+        ("Device path",   record.device_path),
+        ("Size",          f"{record.device_size:,} bytes  ({size_gib:.2f} GiB)"),
+        ("Block size",    f"{record.block_size:,} bytes"),
+        ("Model",         record.model),
+        ("Vendor",        record.vendor),
+        ("Serial",        record.serial),
+        ("Transport",     record.transport),
+    ]))
+
+    # Notes
     if record.notes:
-        lines += [
-            centre("NOTES"),
-            "-" * width,
-            *[f"  {line}" for line in record.notes.splitlines()],
-            "",
-        ]
+        story.append(Paragraph("Notes", section_style))
+        story.append(Paragraph(record.notes, styles['Normal']))
 
-    lines += [
-        border,
-        centre("END OF CERTIFICATE"),
-        border,
-        "",
-    ]
+    # Footer
+    generated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    story.append(Spacer(1, 0.3 * inch))
+    story.append(HRFlowable(width="100%", thickness=1,
+                             color=colors.HexColor("#cccccc")))
+    story.append(Paragraph(
+        f"Generated by OWL — Corvus Forensics LLC &nbsp;&nbsp;|&nbsp;&nbsp; {generated_at}",
+        footer_style))
 
-    cert_text = "\n".join(lines)
+    # --- Render to temp PDF ---
+    try:
+        doc = SimpleDocTemplate(
+            tmp_path,
+            pagesize=letter,
+            leftMargin=0.85 * inch,
+            rightMargin=0.85 * inch,
+            topMargin=0.85 * inch,
+            bottomMargin=0.85 * inch,
+            title="OWL Media Sterilization Certificate",
+            author="Corvus Forensics LLC",
+            subject=f"Wipe certificate for {record.device_path}",
+        )
+        doc.build(story)
+    except Exception as exc:
+        console.print(f"[bold red]✗ Could not render PDF: {exc}[/]")
+        logging(logfile, f"ERROR: PDF render failed: {exc}")
+        return
+
+    # --- Encrypt: empty user password (opens freely) + random owner password ---
+    owner_pass = secrets.token_urlsafe(16)   # 16 bytes → ~22 char base64url
 
     try:
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(cert_text)
-        console.print(f"\n[bold green]✓ Certificate written to:[/] {report_path}")
-        logging(logfile, f"Certificate written to {report_path}")
-    except OSError as exc:
-        console.print(f"[bold red]✗ Could not write certificate to {report_path}: {exc}[/]")
-        logging(logfile, f"ERROR: Could not write certificate: {exc}")
+        reader = PdfReader(tmp_path)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+
+        # user_password=""  → no password to open
+        # owner_password=owner_pass → locks editing/extracting/forms
+        # Permissions: allow printing (print_degraded + printing) and
+        #              copying text, but deny all modification flags
+        writer.encrypt(
+            user_password="",
+            owner_password=owner_pass,
+            permissions_flag=0b000000100100,  # copy + print
+        )
+
+        with open(report_path, "wb") as f:
+            writer.write(f)
+
+        os.remove(tmp_path)
+
+    except Exception as exc:
+        console.print(f"[bold red]✗ Could not encrypt PDF: {exc}[/]")
+        logging(logfile, f"ERROR: PDF encryption failed: {exc}")
+        # Fall back to unencrypted version
+        os.rename(tmp_path, report_path)
+        console.print(f"[yellow]⚠ Saved unencrypted fallback to {report_path}[/]")
+        return
+
+    console.print(f"\n[bold green]✓ Certificate written to:[/] {report_path}")
+    console.print(f"  [dim]Owner passphrase (protects editing):[/] "
+                  f"[bold yellow]{owner_pass}[/]")
+    console.print(f"  [dim]The file opens without a password — "
+                  f"viewing, copying, and printing are unrestricted.[/]")
+    logging(logfile, f"Certificate written to {report_path}")
+    logging(logfile, f"Certificate owner passphrase: {owner_pass}")
 
 
 def _sigint_handler(sig, frame):
@@ -1107,7 +1247,7 @@ def main():
         if os.path.isdir(report_path):
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             devshort = devname.replace('/', '_').strip('_')
-            report_path = os.path.join(report_path, f"owl_cert_{devshort}_{ts}.txt")
+            report_path = os.path.join(report_path, f"owl_cert_{devshort}_{ts}.pdf")
         generate_certificate(record, report_path, logfile)
 
     logging(logfile, "Exited")
