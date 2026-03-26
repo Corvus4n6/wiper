@@ -56,7 +56,7 @@ class WipeRecord:
     # Identity
     operator_host: str  = field(default_factory=lambda: socket.gethostname())
     operator_name: str  = ""
-    start_time: str     = field(default_factory=lambda: datetime.datetime.now().isoformat(timespec='seconds'))
+    start_time: str     = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec='seconds'))
     end_time: str       = ""
 
     # Operation
@@ -217,7 +217,7 @@ def generate_certificate(record: WipeRecord, report_path: str, logfile):
         story.append(Paragraph(record.notes, styles['Normal']))
 
     # Footer
-    generated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = datetime.datetime.now(datetime.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     story.append(Spacer(1, 0.3 * inch))
     story.append(HRFlowable(width="100%", thickness=1,
                              color=colors.HexColor("#cccccc")))
@@ -1021,7 +1021,7 @@ def logging(logfile, message):
     if logfile is None:
         return
     with open(logfile, "a", encoding="ascii") as log:
-        timestamp = datetime.datetime.now().isoformat()
+        timestamp = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec='seconds')
         log.write(f"{timestamp} {message}\n")
 
 def diskinfo(devname, logfile):
@@ -1235,7 +1235,7 @@ def main():
         fulltest(block, blocksize, devsize, logfile, dry_run)
         record.success = True
 
-    record.end_time = datetime.datetime.now().isoformat(timespec='seconds')
+    record.end_time = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec='seconds')
 
     # Generate certificate if --report was requested
     if args.report is not None:
