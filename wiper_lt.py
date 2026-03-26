@@ -30,8 +30,8 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-from reportlab.platypus import KeepTogether
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, HRFlowable,
+    Table as RLTable, TableStyle as RLTableStyle, KeepTogether)
 from pypdf import PdfReader, PdfWriter
 from rich.console import Console
 from rich.progress import (
@@ -158,8 +158,8 @@ def generate_certificate(record: WipeRecord, report_path: str, logfile):
         tdata = [[Paragraph(f'<b>{label}</b>', styles['Normal']),
                   Paragraph(str(value), styles['Normal'])]
                  for label, value in rows]
-        t = Table(tdata, colWidths=[2.2 * inch, 4.2 * inch])
-        t.setStyle(TableStyle([
+        t = RLTable(tdata, [2.2 * inch, 4.2 * inch])
+        t.setStyle(RLTableStyle([
             ('FONTSIZE',    (0, 0), (-1, -1), 9),
             ('TOPPADDING',  (0, 0), (-1, -1), 3),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
@@ -277,12 +277,9 @@ def generate_certificate(record: WipeRecord, report_path: str, logfile):
         return
 
     console.print(f"\n[bold green]✓ Certificate written to:[/] {report_path}")
-    console.print(f"  [dim]Owner passphrase (protects editing):[/] "
-                  f"[bold yellow]{owner_pass}[/]")
     console.print(f"  [dim]The file opens without a password — "
                   f"viewing, copying, and printing are unrestricted.[/]")
     logging(logfile, f"Certificate written to {report_path}")
-    logging(logfile, f"Certificate owner passphrase: {owner_pass}")
 
 
 def _sigint_handler(sig, frame):
