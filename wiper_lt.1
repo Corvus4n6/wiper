@@ -1,0 +1,366 @@
+.TH WIPER_LT 1 "" "OWL" "Forensic Media Sterilization Utility"
+.
+.SH NAME
+wiper_lt \- OWL Optimized Wipe and Logging \(em Forensic Media Sterilization Utility
+.
+.SH SYNOPSIS
+.B wiper_lt
+[\fIOPTIONS\fR]
+\fIDEVICE\fR
+.PP
+.B wiper_lt
+.B \-\-list
+.
+.SH DESCRIPTION
+.B wiper_lt
+is a forensic-grade media sterilization tool designed for field use.
+It performs verified overwrites on block devices, detects stuck bits,
+supports hardware-level erase commands for ATA and NVMe drives, captures
+SMART health data, and generates tamper-resistant PDF certificates
+suitable for chain-of-custody documentation.
+.PP
+The default operation (\fB\-\-full\fR) performs a two-pass overwrite of
+\fB0xFF\fR followed by \fB0x00\fR with read-back verification after each pass.
+This pattern is specifically designed to detect
+.I stuck bits
+\(em storage cells that are permanently fixed in either a high or low state
+and cannot be reliably written to. While rare, stuck bits have been observed
+on all types of storage media including hard drives, SSDs, and USB flash
+storage. A stuck bit in the wrong position can cause a sector to read back
+incorrectly regardless of what is written to it, which may compromise the
+integrity of forensic evidence stored on that media.
+.PP
+.B wiper_lt
+must be run as root.
+.
+.SH DEVICE
+The target block device path, for example
+.IR /dev/sda ,
+.IR /dev/sdb ,
+or
+.IR /dev/nvme0n1 .
+The device must not have any mounted partitions. Use
+.B \-\-list
+to enumerate available block devices before selecting a target.
+.PP
+.I DEVICE
+is required for all operations except
+.BR \-\-list .
+.
+.SH OPTIONS
+.
+.SS Wipe Operations
+.TP
+.BR \-f ", " \-\-full
+Full double-pass wipe and verify. Writes \fB0xFF\fR to every sector and
+verifies, then writes \fB0x00\fR to every sector and verifies again. This
+is the default operation if no wipe mode is specified.
+.IP
+This is the only operation that performs a complete stuck-bit test. See
+.B STUCK BITS
+below.
+.TP
+.BR \-z ", " \-\-zero
+Single-pass null wipe and verify. Writes \fB0x00\fR to every sector and
+verifies the result.
+.TP
+.BR \-s ", " \-\-smart
+Smart wipe. Reads every sector and only overwrites sectors that do not
+already contain \fB0x00\fR. Ideal for limiting write cycles on flash media
+while still ensuring all sectors are cleared. Does not verify after writing.
+.TP
+.BR \-c ", " \-\-check
+Read-only drive map. Scans the entire device and reports what percentage
+of sectors contain only null bytes. No data is written. Useful for
+confirming a drive is already clear before documenting it.
+.TP
+.B \-\-hw\-erase
+Hardware erase using the device's built-in erase command, auto-detected
+by device type:
+.RS
+.IP \(bu 4
+.B ATA/SATA:
+Issues \fBhdparm \-\-security\-erase\fR. Erases all user data. The drive
+typically writes \fB0x00\fR to all sectors, but this is not guaranteed by
+the ATA specification. Followed by a software \fB0x00\fR verify pass.
+.IP \(bu 4
+.B NVMe:
+Issues \fBnvme format \-\-ses=1\fR (User Data Erase). Zeros all user-accessible
+data at the controller level. Followed by a software \fB0x00\fR verify pass.
+.RE
+.IP
+Meets NIST SP 800-88r2 \fBClear\fR.
+Requires
+.B hdparm
+(ATA) or
+.B nvme\-cli
+(NVMe) to be installed.
+.TP
+.B \-\-hw\-secure
+Thorough hardware erase reaching overprovisioned sectors not accessible to the
+OS, auto-detected by device type:
+.RS
+.IP \(bu 4
+.B ATA/SATA:
+Issues \fBhdparm \-\-security\-erase\-enhanced\fR. The enhanced erase command
+instructs the drive controller to erase all storage cells including
+overprovisioned areas, wear-leveling reserves, and remapped sectors.
+.B Note:
+the erase pattern is vendor-defined and may not be \fB0x00\fR. Software
+verification is skipped for this reason \(em a verify pass against \fB0x00\fR
+would produce false mismatches on drives that write a random or proprietary
+pattern. The skipped verify is documented in the wipe certificate.
+.IP \(bu 4
+.B NVMe:
+Issues \fBnvme sanitize \-\-sanact=2\fR (Block Erase) if supported, which
+resets all NAND cells to the factory-erased state including wear-leveling
+and overprovisioning reserves. Falls back to \fBnvme format \-\-ses=1\fR
+if Block Erase is not supported. Followed by a software \fB0x00\fR verify pass.
+.RE
+.IP
+Meets NIST SP 800-88r2 \fBPurge\fR.
+Requires
+.B hdparm
+(ATA) or
+.B nvme\-cli
+(NVMe) to be installed.
+.
+.SS General Options
+.TP
+.B \-\-list
+Enumerate all block devices visible to the system and display a table
+showing device path, model, vendor, serial number, transport type, size,
+and mount status. Exits after displaying the list. Does not require root.
+.TP
+\fB\-b\fR \fISIZE\fR, \fB\-\-blocksize\fR \fISIZE\fR
+Override the default working block size in bytes. The default is
+\fB1048576\fR (1\~MiB). Smaller block sizes may be appropriate for testing
+or for flash media that reports 4K native sectors.
+.TP
+\fB\-l\fR \fIFILE\fR, \fB\-\-logfile\fR \fIFILE\fR
+Write a timestamped log of all operations to \fIFILE\fR. If the file
+already exists, new entries are appended. All timestamps include UTC offset.
+.
+.SS Certificate Options
+.TP
+\fB\-\-report\fR \fIPATH\fR
+Generate a PDF wipe certificate and write it to \fIPATH\fR. If \fIPATH\fR
+is a directory, the file is auto-named as
+\fBowl_cert_\fIdevice\fB_\fItimestamp\fB.pdf\fR.
+.IP
+The certificate is encrypted with a random owner password to prevent
+editing. It opens without a password and may be freely viewed, copied,
+and printed. The owner password is never displayed or logged, making the
+certificate permanently read-only.
+.IP
+When \fB\-\-report\fR is specified, SMART data is automatically captured
+before and after the wipe (if \fBsmartctl\fR is available) and included
+in the certificate.
+.TP
+\fB\-\-operator\fR \fINAME\fR
+Record the name of the operator performing the wipe on the certificate.
+Requires \fB\-\-report\fR.
+.
+.SH STUCK BITS
+A stuck bit is a storage cell permanently fixed in either a \fBhigh\fR (\fB1\fR)
+or \fBlow\fR (\fB0\fR) state that cannot be reliably overwritten. The cell will
+always read back its stuck value regardless of what was written to it.
+.PP
+Stuck bits are uncommon but have been observed on all types of storage media:
+spinning hard drives, NAND flash (SSDs, USB drives, SD cards), and optical
+media. They are more likely to appear on aging or heavily used devices.
+.PP
+A device with a stuck bit in the wrong location may appear to have been wiped
+when it has not been. A sector containing a stuck bit that was originally
+set to \fB1\fR will read back as \fB1\fR even after a null wipe, because the
+cell cannot change state.
+.PP
+The
+.B \-\-full
+operation detects stuck bits by exploiting their fundamental property: a cell
+that is stuck cannot hold both states. By writing \fB0xFF\fR (all bits high),
+verifying, then writing \fB0x00\fR (all bits low) and verifying again, any
+sector that fails either verify pass has cells that could not change state.
+.PP
+Hardware erase commands (\fB\-\-hw\-erase\fR, \fB\-\-hw\-secure\fR) do
+.I not
+perform a stuck-bit test. They delegate erasure to the drive controller, which
+does not report individual cell states. These operations serve a different
+forensic purpose: erasing overprovisioned areas that are inaccessible to the OS.
+For full stuck-bit detection, use \fB\-\-full\fR.
+.
+.SH HARDWARE ERASE VS SOFTWARE WIPE
+Storage devices contain more physical storage than they advertise to the
+operating system. The hidden capacity is used for:
+.IP \(bu 4
+.B Wear leveling
+\(em distributing writes evenly across NAND cells to extend drive lifetime
+.IP \(bu 4
+.B Overprovisioning
+\(em reserved capacity held by the controller for performance and endurance
+.IP \(bu 4
+.B Remapped sectors
+\(em sectors the controller has marked bad and replaced with spare cells
+.PP
+A software wipe (including \fB\-\-full\fR) can only write to sectors the OS
+can address. Data in remapped, overprovisioned, or wear-leveled areas that
+the controller has moved out of the addressable space cannot be reached by
+software overwriting.
+.PP
+Hardware erase commands (\fB\-\-hw\-erase\fR, \fB\-\-hw\-secure\fR) instruct
+the drive controller directly, allowing it to erase all physical storage
+including these hidden areas. For this reason, NIST SP 800-88r2 classifies
+hardware sanitize commands as
+.B Purge
+(higher assurance) while software overwrite is classified as
+.BR Clear .
+.
+.SH WIPE STANDARDS
+The wipe standard is automatically assigned on the certificate based on the
+operation performed. No user input is required.
+.TP
+.B NIST SP 800-88r2 \(em Clear
+(Chandramouli & Hibbard, September 2025)
+One or more passes of a fixed overwrite pattern applied to all addressable
+storage. Data recovery from the media using standard laboratory techniques is
+not possible. Assigned to \fB\-\-full\fR, \fB\-\-zero\fR, and \fB\-\-hw\-erase\fR.
+.TP
+.B NIST SP 800-88r2 \(em Purge
+(Chandramouli & Hibbard, September 2025)
+Media-specific technique that targets all storage including data not
+addressable using standard read and write commands. Renders data recovery
+infeasible even with state-of-the-art laboratory techniques. Assigned to
+\fB\-\-hw\-secure\fR (ATA Enhanced Security Erase or NVMe Block Erase Sanitize).
+.PP
+Full standard: https://doi.org/10.6028/NIST.SP.800-88r2
+.PP
+.TS
+l l.
+\fBOperation\fR	\fBAssigned Standard\fR
+\fB\-\-full\fR	NIST SP 800-88r2 Clear (two-pass 0xFF/0x00 with stuck-bit detection)
+\fB\-\-zero\fR	NIST SP 800-88r2 Clear
+\fB\-\-hw\-erase\fR	NIST SP 800-88r2 Clear
+\fB\-\-hw\-secure\fR	NIST SP 800-88r2 Purge
+\fB\-\-smart\fR	Non-standard (partial overwrite, selective sectors only)
+\fB\-\-check\fR	N/A (read-only operation)
+.TE
+.
+.SH SYSTEM DEPENDENCIES
+The following system tools must be installed separately via your package manager.
+Python packages are listed in \fBrequirements.txt\fR.
+.TP
+.B hdparm
+Required for \fB\-\-hw\-erase\fR and \fB\-\-hw\-secure\fR on ATA/SATA devices.
+.RS
+Debian/Ubuntu: \fBapt install hdparm\fR
+.RE
+.TP
+.B nvme\-cli
+Required for \fB\-\-hw\-erase\fR and \fB\-\-hw\-secure\fR on NVMe devices.
+.RS
+Debian/Ubuntu: \fBapt install nvme\-cli\fR
+.RE
+.TP
+.B smartmontools
+Required for SMART data capture when using \fB\-\-report\fR. If not installed,
+SMART sections are omitted from the certificate without error.
+.RS
+Debian/Ubuntu: \fBapt install smartmontools\fR
+.RE
+.
+.SH EXAMPLES
+List available block devices (does not require root):
+.RS
+.B wiper_lt \-\-list
+.RE
+.PP
+Full double-pass wipe with stuck-bit detection (default operation):
+.RS
+.B sudo wiper_lt /dev/sdb
+.RE
+.PP
+Full wipe with log file and PDF certificate:
+.RS
+.B sudo wiper_lt /dev/sdb \-l /var/log/wipe.log \-\-report /cases/certs/
+.RE
+.PP
+Full wipe with certificate, operator name, and explicit wipe standard:
+.RS
+.B sudo wiper_lt /dev/sdb \-\-report ./certs/ \-\-operator "Jane Smith"
+.RE
+.PP
+Hardware erase (auto-detects ATA or NVMe) with certificate:
+.RS
+.B sudo wiper_lt /dev/sdb \-\-hw\-erase \-\-report ./certs/
+.RE
+.PP
+Hardware secure erase on NVMe (Block Erase + software verify):
+.RS
+.B sudo wiper_lt /dev/nvme0n1 \-\-hw\-secure \-\-report ./certs/
+.RE
+.PP
+Check whether a drive is already clear (read-only, no writes):
+.RS
+.B sudo wiper_lt /dev/sdb \-\-check
+.RE
+.PP
+Smart wipe on a USB flash drive (only rewrites non-null sectors):
+.RS
+.B sudo wiper_lt /dev/sdc \-\-smart
+.RE
+.
+.SH CONFIRMATION
+All destructive operations require the operator to confirm by typing the exact
+device path at the prompt before the wipe begins. This prevents accidental
+erasure of the wrong device.
+.
+.SH FILES
+.TP
+.I /proc/sys/vm/drop_caches
+Written to before each read pass to flush the kernel page cache and ensure
+reads come from disk rather than memory. Requires root.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Error (device not found, permission denied, I/O failure, unsupported hardware).
+.TP
+.B 130
+Interrupted by the user (Ctrl+C).
+.
+.SH NOTES
+\fBwiper_lt\fR opens block devices with \fBO_SYNC\fR to bypass the kernel write
+cache and ensure all writes reach the physical device before proceeding.
+.PP
+The \fB\-\-smart\fR option is particularly well-suited to NAND flash media
+because it limits write cycles by only overwriting sectors that are not already
+null, reducing wear on cells with a finite write endurance.
+.PP
+Wipe certificates are encrypted PDF files. They open without a password and
+support viewing, copying, and printing, but editing is locked with a
+cryptographically random owner password that is never stored or displayed.
+This makes the certificate tamper-evident: any modification requires
+regenerating it, which would produce a different document.
+.
+.SH SEE ALSO
+.BR hdparm (8),
+.BR nvme (1),
+.BR smartctl (8),
+.BR shred (1),
+.BR blkdiscard (8)
+.
+.SH STANDARDS
+NIST Special Publication 800-88 Revision 2 (SP 800-88r2),
+.I Guidelines for Media Sanitization,
+Chandramouli R, Hibbard EA, September 2025.
+.br
+https://doi.org/10.6028/NIST.SP.800-88r2
+.
+.SH AUTHORS
+J-Michael Roberts, Corvus Forensics LLC
+.
+.SH COPYRIGHT
+Copyright \(co Corvus Forensics LLC. All rights reserved.
