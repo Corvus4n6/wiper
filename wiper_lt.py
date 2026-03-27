@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 '''
    , _ ,
   ( o o )   Optimized
@@ -1432,7 +1432,9 @@ def parse_arguments():
     parser.add_argument("--hw-secure",
         help="Thorough hardware erase reaching overprovisioned sectors "
              "(ATA enhanced security-erase or NVMe sanitize block-erase, "
-             "auto-detected) + software verify",
+             "auto-detected). NVMe operations are followed by a software "
+             "verify pass. ATA enhanced security-erase skips software verify "
+             "as the erase pattern is vendor-defined and may not be 0x00.",
         action="store_true", dest="hw_secure")
     parser.add_argument("--dry-run", help="Simulate wipe without writing any data",
         action="store_true", dest="dry_run")
@@ -1445,9 +1447,11 @@ def parse_arguments():
         "(recorded in the certificate, requires --report)",
         metavar="NAME", default=None)
     parser.add_argument("--standard",
-        help="Wipe standard to cite on the certificate "
-            "(e.g. 'NIST 800-88 Clear', 'NIST 800-88 Purge', 'DoD 5220.22-M'). "
-            "Requires --report.",
+        help="Optional override for the wipe standard cited on the certificate. "
+            "A standard is automatically assigned based on the operation used "
+            "(e.g. NIST SP 800-88 Rev. 1 Clear/Purge). Use this only when you "
+            "need to cite a different standard "
+            "(e.g. 'DoD 5220.22-M'). Requires --report.",
         metavar="STANDARD", default=None)
 
     return parser.parse_args()
