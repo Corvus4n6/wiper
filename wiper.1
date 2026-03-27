@@ -1,18 +1,28 @@
+.\" Man page for wiper - OWL Forensic Media Sterilization Utility
+.\" Corvus Forensics LLC
+.\"
+.\" To install:
+.\"   sudo cp wiper.1 /usr/local/share/man/man1/
+.\"   sudo mandb
+.\"
+.\" To view without installing:
+.\"   man ./wiper.1
+.\"
 .TH WIPER_LT 1 "" "OWL" "Forensic Media Sterilization Utility"
 .
 .SH NAME
-wiper_lt \- OWL Optimized Wipe and Logging \(em Forensic Media Sterilization Utility
+wiper \- OWL Optimized Wipe and Logging \(em Forensic Media Sterilization Utility
 .
 .SH SYNOPSIS
-.B wiper_lt
+.B wiper
 [\fIOPTIONS\fR]
 \fIDEVICE\fR
 .PP
-.B wiper_lt
+.B wiper
 .B \-\-list
 .
 .SH DESCRIPTION
-.B wiper_lt
+.B wiper
 is a forensic-grade media sterilization tool designed for field use.
 It performs verified overwrites on block devices, detects stuck bits,
 supports hardware-level erase commands for ATA and NVMe drives, captures
@@ -30,7 +40,7 @@ storage. A stuck bit in the wrong position can cause a sector to read back
 incorrectly regardless of what is written to it, which may compromise the
 integrity of forensic evidence stored on that media.
 .PP
-.B wiper_lt
+.B wiper
 must be run as root.
 .
 .SH DEVICE
@@ -271,42 +281,42 @@ Debian/Ubuntu: \fBapt install smartmontools\fR
 .SH EXAMPLES
 List available block devices (does not require root):
 .RS
-.B wiper_lt \-\-list
+.B wiper \-\-list
 .RE
 .PP
 Full double-pass wipe with stuck-bit detection (default operation):
 .RS
-.B sudo wiper_lt /dev/sdb
+.B sudo wiper /dev/sdb
 .RE
 .PP
 Full wipe with log file and PDF certificate:
 .RS
-.B sudo wiper_lt /dev/sdb \-l /var/log/wipe.log \-\-report /cases/certs/
+.B sudo wiper /dev/sdb \-l /var/log/wipe.log \-\-report /cases/certs/
 .RE
 .PP
 Full wipe with certificate, operator name, and explicit wipe standard:
 .RS
-.B sudo wiper_lt /dev/sdb \-\-report ./certs/ \-\-operator "Jane Smith"
+.B sudo wiper /dev/sdb \-\-report ./certs/ \-\-operator "Jane Smith"
 .RE
 .PP
 Hardware erase (auto-detects ATA or NVMe) with certificate:
 .RS
-.B sudo wiper_lt /dev/sdb \-\-hw\-erase \-\-report ./certs/
+.B sudo wiper /dev/sdb \-\-hw\-erase \-\-report ./certs/
 .RE
 .PP
 Hardware secure erase on NVMe (Block Erase + software verify):
 .RS
-.B sudo wiper_lt /dev/nvme0n1 \-\-hw\-secure \-\-report ./certs/
+.B sudo wiper /dev/nvme0n1 \-\-hw\-secure \-\-report ./certs/
 .RE
 .PP
 Check whether a drive is already clear (read-only, no writes):
 .RS
-.B sudo wiper_lt /dev/sdb \-\-check
+.B sudo wiper /dev/sdb \-\-check
 .RE
 .PP
 Smart wipe on a USB flash drive (only rewrites non-null sectors):
 .RS
-.B sudo wiper_lt /dev/sdc \-\-smart
+.B sudo wiper /dev/sdc \-\-smart
 .RE
 .
 .SH CONFIRMATION
@@ -332,7 +342,7 @@ Error (device not found, permission denied, I/O failure, unsupported hardware).
 Interrupted by the user (Ctrl+C).
 .
 .SH NOTES
-\fBwiper_lt\fR opens block devices with \fBO_SYNC\fR to bypass the kernel write
+\fBwiper\fR opens block devices with \fBO_SYNC\fR to bypass the kernel write
 cache and ensure all writes reach the physical device before proceeding.
 .PP
 The \fB\-\-smart\fR option is particularly well-suited to NAND flash media
