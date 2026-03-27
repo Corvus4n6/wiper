@@ -1389,7 +1389,9 @@ def parse_arguments():
         action="store_true")
     parser.add_argument("-c", "--check", help="verify media contains only nulls",
         action="store_true")
-    parser.add_argument("-l", "--logfile", help="write/append info to log file")
+    parser.add_argument("-l", "--logfile",
+        help="Write/append timestamped log to FILE. If FILE is a directory, "
+             "the log is auto-named as owl_log_<device>_<timestamp>.txt inside it.")
     parser.add_argument("-b", "--blocksize",
         help="override default working blocksize")
     parser.add_argument("--hw-erase",
@@ -1526,6 +1528,12 @@ def main():
         sys.exit(1)
 
     logfile = args.logfile  # None if not provided by user
+
+    # If a directory was given for --logfile, auto-name the file inside it
+    if logfile is not None and os.path.isdir(logfile):
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        devshort = devname.replace('/', '_').strip('_')
+        logfile = os.path.join(logfile, f"owl_log_{devshort}_{ts}.txt")
 
     # Determine operation label early for the record
     if args.check:
