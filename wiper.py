@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2018-2026 J-Michael Roberts, Corvus Forensics LLC
 '''
    , _ ,
   ( o o )   Optimized
@@ -8,8 +10,7 @@
     """
 OWL - Optimized Wiping and Logging
 forensic drive wiper program by Corvus Forensics LLC
-designed to wipe, verify, optional logging
-LightweighT version for offline use in the field
+designed to wipe, verify, optional logging, and paperwork generator
 '''
 import os
 import sys
