@@ -77,6 +77,14 @@ class WipeRecord:
     success: bool       = False
     notes: str          = ""
 
+    # SMART data (captured before and after wipe)
+    smart_pre: dict     = field(default_factory=dict)
+    smart_post: dict    = field(default_factory=dict)
+    smart_available: bool = False
+
+    # Wipe standard compliance
+    wipe_standard: str  = ""
+
 
 def generate_certificate(record: WipeRecord, report_path: str, logfile):
     '''
@@ -190,14 +198,17 @@ def generate_certificate(record: WipeRecord, report_path: str, logfile):
 
     # Operation details
     story.append(Paragraph("Operation Details", section_style))
-    story.append(info_table([
+    op_rows = [
         ("Operation",     record.operation),
         ("Command",       record.command),
         ("Start time",    record.start_time),
         ("End time",      record.end_time or "—"),
         ("Operator",      record.operator_name or "—"),
         ("Operator host", record.operator_host),
-    ]))
+    ]
+    if record.wipe_standard:
+        op_rows.append(("Wipe standard", record.wipe_standard))
+    story.append(info_table(op_rows))
 
     # Device details
     story.append(Paragraph("Device Details", section_style))
@@ -211,7 +222,66 @@ def generate_certificate(record: WipeRecord, report_path: str, logfile):
         ("Transport",     record.transport),
     ]))
 
-    # Notes
+    # SMART data
+    if record.smart_available:
+        def smart_section(title, smart):
+            if not smart:
+                return
+            story.append(Paragraph(title, section_style))
+            rows = [("Overall Health", smart.get("health", "—")),
+                    ("Firmware",       smart.get("firmware", "—"))]
+            for _, label in _SMART_ATTRS:
+                if label in smart:
+                    rows.append((label, smart[label]))
+            story.append(info_table(rows))
+
+        smart_section("SMART Data — Pre-Wipe",  record.smart_pre)
+        smart_section("SMART Data — Post-Wipe", record.smart_post)
+
+    # Notes — user-supplied or auto-generated for hardware erase operations
+    nvme_ops = ("NVMe User Data Erase", "NVMe Block Erase")
+    ata_ops  = ("ATA Secure Erase", "ATA Erase")
+    hw_ops   = ("Hardware Erase", "Hardware Secure Erase")
+    if not record.notes:
+        if any(record.operation.startswith(op) for op in nvme_ops):
+            record.notes = (
+                "Hardware erase via NVMe controller command. "
+                "All user data including overprovisioned sectors was erased at the "
+                "controller level. A software verification pass confirmed the drive "
+                "surfaces as zeroed.\n\n"
+                "Note: This operation does NOT constitute a stuck-bit test. "
+                "Stuck-bit detection requires a full software double-pass wipe "
+                "(FF\u219200, verify each pass). Hardware erase and stuck-bit "
+                "testing serve different forensic purposes."
+            )
+        elif any(record.operation.startswith(op) for op in ata_ops):
+            record.notes = (
+                "Hardware erase via ATA security command. "
+                "Reaches overprovisioned sectors not accessible to the OS.\n\n"
+                "Note: This operation does NOT constitute a stuck-bit test. "
+                "Stuck-bit detection requires a full software double-pass wipe.\n\n"
+                "Note: Software verification was skipped for ATA Enhanced Security "
+                "Erase. The erase pattern is vendor-defined and may not be 0x00 — "
+                "a verify pass against 0x00 would produce false mismatches on drives "
+                "that use a random or proprietary pattern."
+            )
+        elif any(record.operation.startswith(op) for op in hw_ops):
+            record.notes = (
+                "Hardware erase auto-dispatched to the appropriate method for this "
+                "device type (NVMe or ATA). Overprovisioned sectors not normally "
+                "accessible to the OS were erased at the controller level.\n\n"
+                "For NVMe operations: a software verification pass confirmed the "
+                "drive surfaces as zeroed.\n\n"
+                "For ATA Enhanced Security Erase: software verification was skipped "
+                "because the erase pattern is vendor-defined and may not be 0x00 — "
+                "a verify pass would produce false mismatches on drives that use a "
+                "random or proprietary pattern.\n\n"
+                "Note: This operation does NOT constitute a stuck-bit test. "
+                "Stuck-bit detection requires a full software double-pass wipe "
+                "(FF\u219200, verify each pass). Hardware erase and stuck-bit "
+                "testing serve different forensic purposes."
+            )
+
     if record.notes:
         story.append(Paragraph("Notes", section_style))
         story.append(Paragraph(record.notes, styles['Normal']))
@@ -371,7 +441,7 @@ def flushcaches():
     context or restricted environment) rather than crashing.
     '''
     try:
-        with open('/proc/sys/vm/drop_caches', 'w', encoding="ascii") as file_object:
+        with open('/proc/sys/vm/drop_caches', 'w', encoding="utf-8") as file_object:
             file_object.write("1\n")
     except OSError:
         pass  # non-fatal: cache flush is a best-effort optimization
@@ -525,7 +595,7 @@ def check_ata_support(devname, mode, logfile):
         if re.search(r'not\tsupported: enhanced erase', hdpi):
             console.print("[bold red]ERROR: ATA Enhanced Security Erase is not "
                 f"supported by {devname}.[/]")
-            console.print("[dim]Tip: Try --ataerase for standard ATA Erase instead.[/]")
+            console.print("[dim]Tip: Try --hw-erase for standard ATA Erase instead.[/]")
             logging(logfile, "ERROR: ATA Enhanced Security Erase not supported.")
             sys.exit(1)
     elif mode == "erase":
@@ -553,19 +623,6 @@ def check_ata_support(devname, mode, logfile):
     return hdpi
 
 
-def atasecure(devname, logfile, hdpi=None):
-    '''
-    call hdparm and ATA Secure-Erase the drive
-    ###
-    hdparm -I <device>
-    hdparm --user-master user --security-set-pass pass <device>
-    hdparm --user-master user --security-erase-enhanced pass <device>
-     - or if enhanced is not supported -
-    hdparm --user-master user --security-erase pass <device>
-     - afterwards, remove passwords from drive -
-    hdparm --user-master user --security-disable pass <device>
-    hdparm --user-master user --security-set-pass NULL <device>
-    '''
 def atasecure(devname, logfile, hdpi=None):
     '''
     ATA Secure Erase (Enhanced). Pre-flight checks are expected to have
@@ -615,6 +672,297 @@ def ataerase(devname, logfile, hdpi=None):
     console.print("[bold green]✓ ATA Erase completed.[/]")
     logging(logfile, "ATA Erase completed.")
     # note: we can't call this 'clean' or 'clear' because the pattern may not be zeroes
+
+
+def check_nvme_support(devname, mode, logfile):
+    '''
+    Pre-flight check for NVMe erase operations. Queries nvme id-ctrl to confirm
+    the requested erase method is supported before showing the confirmation screen.
+
+    mode: "format"   -> nvme format --ses=1 (User Data Erase)
+          "sanitize" -> nvme sanitize --sanact=2 (Block Erase)
+
+    Returns a dict of controller info on success. Exits with a clear message
+    if the command or capability is not available.
+
+    nvme id-ctrl JSON fields used:
+      mn      -> model name
+      fr      -> firmware revision
+      oacs    -> Optional Admin Command Support (bit 3 = sanitize supported)
+      sanicap -> Sanitize Capabilities (bit 1 = block erase, bit 0 = crypto erase)
+      fna     -> Format NVM Attributes (bit 1 = format applies to all namespaces)
+    '''
+    import json as _json
+
+    if command_line(['which', 'nvme']) == b'':
+        console.print("[bold red]ERROR: nvme-cli is not installed or not in PATH. "
+            "Install nvme-cli and try again.[/]")
+        logging(logfile, "ERROR: nvme-cli not found.")
+        sys.exit(1)
+
+    console.print(f"[dim]Querying NVMe controller capabilities on {devname}...[/]")
+    raw = command_line(['nvme', 'id-ctrl', devname, '--output-format=json'],
+                       cmdtimeout=10).decode(errors='replace')
+    if not raw:
+        console.print(f"[bold red]ERROR: nvme id-ctrl returned no output for {devname}. "
+            "Is this an NVMe device?[/]")
+        logging(logfile, f"ERROR: nvme id-ctrl returned no output for {devname}.")
+        sys.exit(1)
+
+    try:
+        ctrl = _json.loads(raw)
+    except _json.JSONDecodeError as exc:
+        console.print(f"[bold red]ERROR: Could not parse nvme id-ctrl output: {exc}[/]")
+        logging(logfile, f"ERROR: nvme id-ctrl JSON parse failed: {exc}")
+        sys.exit(1)
+
+    oacs   = ctrl.get('oacs',   0)
+    sanicap = ctrl.get('sanicap', 0)
+    fna    = ctrl.get('fna',    0)
+    model  = ctrl.get('mn', '—').strip()
+    fw     = ctrl.get('fr', '—').strip()
+
+    console.print(f"[cyan]NVMe controller: {model}  Firmware: {fw}[/]")
+
+    # Warn if format applies to all namespaces — important for multi-NS drives
+    if fna & 0b010:
+        console.print("[bold yellow]⚠ Warning: Format NVM applies to ALL namespaces "
+            "on this controller, not just the target namespace.[/]")
+        logging(logfile, "Warning: fna bit 1 set — format applies to all namespaces.")
+
+    if mode == "sanitize":
+        # Requires sanitize command support (oacs bit 3) and block erase (sanicap bit 1)
+        if not (oacs & (1 << 3)):
+            console.print("[bold red]ERROR: This NVMe controller does not support the "
+                "Sanitize command.[/]")
+            console.print("[dim]Tip: Try --hw-erase for User Data Erase instead.[/]")
+            logging(logfile, "ERROR: NVMe Sanitize not supported (oacs bit 3 not set).")
+            sys.exit(1)
+        if not (sanicap & 0b010):
+            console.print("[bold red]ERROR: This NVMe controller does not support "
+                "Block Erase sanitize.[/]")
+            crypto = bool(sanicap & 0b001)
+            if crypto:
+                console.print("[dim]Tip: Cryptographic erase is supported on this "
+                    "drive but is not implemented in OWL.[/]")
+            logging(logfile, f"ERROR: NVMe Block Erase not supported (sanicap={sanicap:#x}).")
+            sys.exit(1)
+
+    elif mode == "format":
+        # nvme format --ses=1 is broadly supported but check the command is available
+        # by verifying nvme format help returns without error
+        fmtcheck = command_line(['nvme', 'format', '--help'], cmdtimeout=5)
+        if not fmtcheck:
+            console.print("[bold red]ERROR: nvme format command not available.[/]")
+            logging(logfile, "ERROR: nvme format command not available.")
+            sys.exit(1)
+
+    logging(logfile, f"NVMe pre-flight checks passed for {devname} "
+        f"(mode={mode}, oacs={oacs:#x}, sanicap={sanicap:#x})")
+    return ctrl
+
+
+def nvme_format(devname, block, blocksize, devsize, logfile):
+    '''
+    --nvme-format
+    NVMe User Data Erase via nvme format --ses=1.
+
+    This issues a controller-level erase command that zeros all user data
+    including overprovisioned sectors not accessible to the OS.
+
+    NOTE: This is a hardware erase — it does NOT perform a stuck-bit test.
+    A software verify pass (readloop 0x00) is run afterwards to confirm
+    the drive surfaces as zeroed.
+
+    Not equivalent to --full for stuck-bit detection purposes.
+    '''
+    logging(logfile, "NVMe Format (User Data Erase) started.")
+    console.print("[cyan]Issuing NVMe Format User Data Erase (ses=1)...[/]")
+
+    result = command_line(['nvme', 'format', devname, '--ses=1', '--force'],
+                          cmdtimeout=300)
+    if result == b'Timeout':
+        console.print("[bold red]ERROR: nvme format timed out after 5 minutes.[/]")
+        logging(logfile, "ERROR: nvme format timed out.")
+        sys.exit(1)
+
+    console.print("[bold green]✓ NVMe Format (User Data Erase) completed.[/]")
+    logging(logfile, "NVMe Format (User Data Erase) completed.")
+
+    # Sync and flush before verify
+    console.print("[dim]Syncing...[/]")
+    os.sync()
+    flushcaches()
+
+    # Software verify pass — confirms the drive reads back as zeros
+    console.print("[cyan]Running software verification pass (0x00)...[/]")
+    readloop(block, blocksize, devsize, "00", logfile)
+    logging(logfile, "NVMe Format + software verify completed.")
+
+
+def nvme_sanitize(devname, block, blocksize, devsize, logfile):
+    '''
+    --nvme-sanitize
+    NVMe Block Erase via nvme sanitize --sanact=2.
+
+    Block Erase resets all NAND cells to the factory erased state — more
+    thorough than User Data Erase and reaches all storage including
+    wear-leveling reserves and overprovisioned areas.
+
+    The drive handles the operation internally; OWL polls for completion.
+
+    NOTE: This is a hardware erase — it does NOT perform a stuck-bit test.
+    A software verify pass (readloop 0x00) is run afterwards to confirm
+    the drive surfaces as zeroed.
+
+    Not equivalent to --full for stuck-bit detection purposes.
+    '''
+    logging(logfile, "NVMe Sanitize (Block Erase) started.")
+    console.print("[cyan]Issuing NVMe Sanitize Block Erase (sanact=2)...[/]")
+
+    result = command_line(['nvme', 'sanitize', devname, '--sanact=2'],
+                          cmdtimeout=30)
+    if result == b'Timeout':
+        console.print("[bold red]ERROR: nvme sanitize command timed out.[/]")
+        logging(logfile, "ERROR: nvme sanitize command timed out.")
+        sys.exit(1)
+
+    # Sanitize runs asynchronously — poll nvme sanitize-log until complete
+    console.print("[dim]Waiting for sanitize operation to complete...[/]")
+    logging(logfile, "Polling nvme sanitize-log for completion...")
+
+    with Progress(
+        TextColumn("[bold cyan]Sanitizing"),
+        BarColumn(bar_width=None),
+        TextColumn("[dim]{task.fields[status]}"),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task("Sanitizing", total=100, status="waiting...")
+        poll_interval = 5  # seconds between polls
+        elapsed = 0
+        while True:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            log_raw = command_line(['nvme', 'sanitize-log', devname,
+                                    '--output-format=json'], cmdtimeout=10)
+            if not log_raw:
+                progress.update(task, status=f"polling... ({elapsed}s)")
+                continue
+            try:
+                import json as _json
+                slog = _json.loads(log_raw.decode(errors='replace'))
+                # sprog: sanitize progress (0-65535, where 65535 = 100%)
+                # sstat: sanitize status (1=success, 2=in_progress, 3=failed)
+                sstat = slog.get('sstat', 0) & 0x7  # lower 3 bits = status
+                sprog = slog.get('sprog', 0)
+                pct   = min(int(sprog / 65535 * 100), 100)
+
+                if sstat == 1:  # completed successfully
+                    progress.update(task, completed=100, status="complete")
+                    break
+                elif sstat == 3:  # failed
+                    progress.stop()
+                    console.print("[bold red]ERROR: NVMe Sanitize reported failure.[/]")
+                    logging(logfile, "ERROR: NVMe Sanitize operation failed (sstat=3).")
+                    sys.exit(1)
+                else:
+                    progress.update(task, completed=pct,
+                                    status=f"{pct}% ({elapsed}s elapsed)")
+            except Exception:
+                progress.update(task, status=f"polling... ({elapsed}s)")
+
+    console.print("[bold green]✓ NVMe Sanitize (Block Erase) completed.[/]")
+    logging(logfile, "NVMe Sanitize (Block Erase) completed.")
+
+    console.print("[dim]Syncing...[/]")
+    os.sync()
+    flushcaches()
+
+    # Software verify pass
+    console.print("[cyan]Running software verification pass (0x00)...[/]")
+    readloop(block, blocksize, devsize, "00", logfile)
+    logging(logfile, "NVMe Sanitize + software verify completed.")
+
+
+def _is_nvme(devname):
+    '''Return True if devname is an NVMe block device.'''
+    return os.path.basename(devname).startswith('nvme')
+
+
+def hw_erase(devname, block, blocksize, devsize, logfile, hw_info=None):
+    '''
+    --hw-erase
+    Standard hardware erase, dispatched by device type:
+      NVMe  -> nvme format --ses=1  (User Data Erase)
+      ATA   -> hdparm --security-erase
+
+    Followed by a software readloop 0x00 verify pass.
+    Pre-flight checks are run in main() before this is called.
+    hw_info is the return value of check_nvme_support() or check_ata_support().
+    Does NOT perform a stuck-bit test.
+    '''
+    if _is_nvme(devname):
+        logging(logfile, "hw-erase: NVMe device, using nvme format --ses=1")
+        console.print("[dim]NVMe device detected — using NVMe User Data Erase.[/]")
+        nvme_format(devname, block, blocksize, devsize, logfile)
+    else:
+        logging(logfile, "hw-erase: ATA device, using hdparm --security-erase")
+        console.print("[dim]ATA device detected — using ATA Security Erase.[/]")
+        ataerase(devname, logfile, hw_info)
+        # ATA standard erase typically writes zeros — run verify pass
+        console.print("[dim]Syncing...[/]")
+        os.sync()
+        flushcaches()
+        console.print("[cyan]Running software verification pass (0x00)...[/]")
+        readloop(block, blocksize, devsize, "00", logfile)
+        logging(logfile, "ATA Erase + software verify completed.")
+
+
+def hw_secure(devname, block, blocksize, devsize, logfile, hw_info=None):
+    '''
+    --hw-secure
+    Thorough hardware erase reaching overprovisioned sectors,
+    dispatched by device type:
+      NVMe  -> nvme sanitize --sanact=2 (Block Erase), or nvme format --ses=1 fallback
+      ATA   -> hdparm --security-erase-enhanced
+
+    NVMe paths follow with a software readloop 0x00 verify pass.
+    ATA Enhanced Security Erase does NOT verify — the erase pattern is
+    vendor-defined and may not be 0x00, so a verify pass would produce
+    false mismatches. This is documented in the certificate.
+
+    Pre-flight checks are run in main() before this is called.
+    hw_info is the return value of check_nvme_support() or check_ata_support().
+    Does NOT perform a stuck-bit test.
+    '''
+    if _is_nvme(devname):
+        # Determine which NVMe method was selected by pre-flight in main()
+        # hw_info is a dict from check_nvme_support(); sanicap tells us what's available
+        import json as _json
+        sanicap = hw_info.get('sanicap', 0) if isinstance(hw_info, dict) else 0
+        if bool(sanicap & 0b010):
+            logging(logfile, "hw-secure: NVMe, using nvme sanitize (block erase)")
+            console.print("[dim]NVMe device — using NVMe Block Erase (sanitize).[/]")
+            nvme_sanitize(devname, block, blocksize, devsize, logfile)
+        else:
+            logging(logfile, "hw-secure: NVMe, falling back to nvme format --ses=1")
+            console.print("[dim]NVMe device — using NVMe User Data Erase (format fallback).[/]")
+            nvme_format(devname, block, blocksize, devsize, logfile)
+    else:
+        logging(logfile, "hw-secure: ATA device, using hdparm --security-erase-enhanced")
+        console.print("[dim]ATA device detected — using ATA Enhanced Security Erase.[/]")
+        atasecure(devname, logfile, hw_info)
+        # ATA Enhanced Security Erase writes a vendor-defined pattern that may not
+        # be 0x00. Skipping software verify to avoid false mismatches.
+        # This is noted in the certificate.
+        console.print("[dim]Syncing...[/]")
+        os.sync()
+        flushcaches()
+        console.print("[bold green]✓ ATA Enhanced Security Erase completed. "
+            "Verify pass skipped (vendor-defined erase pattern).[/]")
+        logging(logfile, "ATA Enhanced Security Erase completed. "
+            "Verify pass skipped — erase pattern is vendor-defined, may not be 0x00.")
 
 def writeloop(block, blocksize, devsize, pattern, logfile, dry_run=False):
     '''
@@ -977,6 +1325,86 @@ def _collect_mounts(node):
     return mounts
 
 
+# SMART attribute IDs we want to capture for the certificate.
+# Tuple: (attribute_id_decimal, friendly_label)
+_SMART_ATTRS = [
+    ("9",   "Power-On Hours"),
+    ("12",  "Power Cycle Count"),
+    ("190", "Temperature (Alt)"),
+    ("194", "Temperature (Celsius)"),
+    ("197", "Current Pending Sectors"),
+    ("198", "Uncorrectable Sectors"),
+    ("5",   "Reallocated Sectors"),
+    ("187", "Reported Uncorrectable"),
+    ("188", "Command Timeout"),
+    ("196", "Reallocation Events"),
+]
+
+def capture_smart(devname, logfile):
+    '''
+    Run smartctl -a against devname and parse the output into a dict of
+    key→value strings suitable for embedding in WipeRecord.
+
+    Returns a dict with keys:
+      "health"        → overall SMART health assessment string
+      "firmware"      → firmware version
+      "raw_output"    → full smartctl -a text (stored but not displayed in full)
+      plus one key per _SMART_ATTRS label found in the output
+
+    Returns an empty dict if smartctl is not available or the device does
+    not support SMART — callers should check record.smart_available.
+    '''
+    if command_line(['which', 'smartctl']) == b'':
+        logging(logfile, "SMART: smartctl not found — skipping SMART capture.")
+        return {}
+
+    # Overall health pass/fail
+    health_out = command_line(
+        ['smartctl', '-H', devname], cmdtimeout=15
+    ).decode(errors='replace')
+
+    # Full attribute dump
+    full_out = command_line(
+        ['smartctl', '-a', devname], cmdtimeout=15
+    ).decode(errors='replace')
+
+    if not full_out:
+        logging(logfile, "SMART: smartctl returned no output — device may not support SMART.")
+        return {}
+
+    result = {}
+
+    # Health string — look for the assessment line
+    health_match = re.search(
+        r'SMART overall-health self-assessment test result:\s*(.+)', health_out)
+    result['health'] = health_match.group(1).strip() if health_match else 'UNKNOWN'
+
+    # Firmware version
+    fw_match = re.search(r'Firmware Version:\s*(.+)', full_out)
+    result['firmware'] = fw_match.group(1).strip() if fw_match else '—'
+
+    # Parse attribute table — lines look like:
+    #   ID# ATTRIBUTE_NAME          FLAG  VALUE WORST THRESH TYPE  UPDATED  WHEN_FAILED RAW_VALUE
+    #   194 Temperature_Celsius     0x0022  033   046   000   Old_age Always   -       33 (Min/Max 22/46)
+    for attr_id, label in _SMART_ATTRS:
+        # Match by attribute ID at start of line (decimal, 1-3 digits)
+        pattern = rf'^\s*{attr_id}\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$'
+        match = re.search(pattern, full_out, re.MULTILINE)
+        if match:
+            result[label] = match.group(1).strip()
+
+    # Also capture NVMe-style temperature if present (different format)
+    if 'Temperature (Celsius)' not in result:
+        nvme_temp = re.search(r'Temperature:\s*(\d+)\s*Celsius', full_out)
+        if nvme_temp:
+            result['Temperature (Celsius)'] = nvme_temp.group(1)
+
+    result['raw_output'] = full_out
+    logging(logfile, f"SMART captured for {devname}: health={result['health']}, "
+        f"firmware={result['firmware']}")
+    return result
+
+
 def parse_arguments():
     '''
     handle command line args
@@ -997,10 +1425,15 @@ def parse_arguments():
     parser.add_argument("-l", "--logfile", help="write/append info to log file")
     parser.add_argument("-b", "--blocksize",
         help="override default working blocksize")
-    parser.add_argument("--ataerase", help="Perform ATA Erase",
-        action="store_true")
-    parser.add_argument("--atasecure", help="Perform ATA Secure Erase",
-        action="store_true")
+    parser.add_argument("--hw-erase",
+        help="Hardware erase (ATA security-erase or NVMe format --ses=1, "
+             "auto-detected) + software verify",
+        action="store_true", dest="hw_erase")
+    parser.add_argument("--hw-secure",
+        help="Thorough hardware erase reaching overprovisioned sectors "
+             "(ATA enhanced security-erase or NVMe sanitize block-erase, "
+             "auto-detected) + software verify",
+        action="store_true", dest="hw_secure")
     parser.add_argument("--dry-run", help="Simulate wipe without writing any data",
         action="store_true", dest="dry_run")
     parser.add_argument("--list", help="List available block devices and exit",
@@ -1011,6 +1444,11 @@ def parse_arguments():
     parser.add_argument("--operator", help="Name of the operator performing the wipe "
         "(recorded in the certificate, requires --report)",
         metavar="NAME", default=None)
+    parser.add_argument("--standard",
+        help="Wipe standard to cite on the certificate "
+            "(e.g. 'NIST 800-88 Clear', 'NIST 800-88 Purge', 'DoD 5220.22-M'). "
+            "Requires --report.",
+        metavar="STANDARD", default=None)
 
     return parser.parse_args()
 
@@ -1020,7 +1458,7 @@ def logging(logfile, message):
     '''
     if logfile is None:
         return
-    with open(logfile, "a", encoding="ascii") as log:
+    with open(logfile, "a", encoding="utf-8") as log:
         timestamp = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec='seconds')
         log.write(f"{timestamp} {message}\n")
 
@@ -1085,6 +1523,23 @@ def mountcheck(blkdata, logfile, mountct):
             mountct += 1
     return mountct
 
+# Maps each operation label to its NIST SP 800-88 Rev. 1 standard.
+# Used to auto-populate the certificate wipe_standard field.
+# --standard on the command line overrides these.
+_WIPE_STANDARDS = {
+    "Full Double Wipe + Verify (FF then 00)":                     "Two-pass overwrite (0xFF / 0x00) with verification — meets NIST SP 800-88 Rev. 1 Clear; designed for stuck-bit detection",
+    "Full Double Wipe + Verify (FF then 00) [default]":           "Two-pass overwrite (0xFF / 0x00) with verification — meets NIST SP 800-88 Rev. 1 Clear; designed for stuck-bit detection",
+    "Single-Pass Zero + Verify":                                  "NIST SP 800-88 Rev. 1 — Clear",
+    "Smart Wipe (selective null overwrite)":                      "Non-standard (partial overwrite, selective sectors only)",
+    "Drive Map / Null Check (read-only)":                         "N/A — read-only operation",
+    "Hardware Erase + Software Verify (NVMe format)":             "NIST SP 800-88 Rev. 1 — Clear",
+    "Hardware Erase + Software Verify (ATA security-erase)":      "NIST SP 800-88 Rev. 1 — Clear",
+    "Hardware Secure Erase + Software Verify (NVMe sanitize)":    "NIST SP 800-88 Rev. 1 — Purge",
+    "Hardware Secure Erase + Software Verify (NVMe format)":      "NIST SP 800-88 Rev. 1 — Clear",
+    "Hardware Secure Erase (ATA enhanced security-erase)":        "NIST SP 800-88 Rev. 1 — Purge",
+}
+
+
 def main():
     '''
     Entry point. Parses arguments, opens the device, and dispatches to the
@@ -1121,12 +1576,16 @@ def main():
         operation = "Single-Pass Zero + Verify"
     elif args.full:
         operation = "Full Double Wipe + Verify (FF then 00)"
-    elif args.atasecure:
-        operation = "ATA Secure Erase (Enhanced)"
-    elif args.ataerase:
-        operation = "ATA Erase"
+    elif args.hw_erase:
+        operation = "Hardware Erase + Software Verify"
+    elif args.hw_secure:
+        operation = "Hardware Secure Erase + Software Verify"
     else:
         operation = "Full Double Wipe + Verify (FF then 00) [default]"
+
+    # Auto-assign the wipe standard from the map; --standard overrides
+    auto_standard = _WIPE_STANDARDS.get(operation, "")
+    wipe_standard = args.standard or auto_standard
 
     record = WipeRecord(
         operation=operation,
@@ -1134,11 +1593,16 @@ def main():
         command=' '.join(sys.argv),
         device_path=devname,
         operator_name=args.operator or "",
+        wipe_standard=wipe_standard,
     )
 
     if args.operator and args.report is None:
         console.print("[yellow]⚠ --operator was specified but --report was not. "
             "The operator name will not be saved unless --report is also used.[/]")
+
+    if args.standard and args.report is None:
+        console.print("[yellow]⚠ --standard was specified but --report was not. "
+            "The wipe standard will not be saved unless --report is also used.[/]")
 
     atexit.register(cleanup)
     rootcheck()
@@ -1192,6 +1656,12 @@ def main():
         record.serial    = str(blkdata.get('serial', '') or '—').strip()
         record.transport = str(blkdata.get('tran',   '') or '—').strip()
 
+    # Capture SMART data before the wipe
+    if args.report is not None and not args.check:
+        console.print("[dim]Capturing pre-wipe SMART data...[/]")
+        record.smart_pre = capture_smart(devname, logfile)
+        record.smart_available = bool(record.smart_pre)
+
     if args.check:
         drivemap(block, blocksize, devsize, logfile)
         record.success = True
@@ -1211,29 +1681,71 @@ def main():
             confirm_wipe(devname, devsize, operation, logfile)
         fulltest(block, blocksize, devsize, logfile, dry_run)
         record.success = True
-    elif args.atasecure:
+    elif args.hw_erase:
         if dry_run:
-            console.print("[yellow]⚠ --dry-run has no effect with --atasecure "
-                "(ATA commands are issued by hdparm, not OWL). Skipping.[/]")
+            console.print("[yellow]⚠ --dry-run has no effect with --hw-erase "
+                "(hardware erase command is not issued by OWL). Skipping.[/]")
         else:
-            hdpi = check_ata_support(devname, "secure", logfile)
+            # Pre-flight before confirmation screen
+            if _is_nvme(devname):
+                hw_info = check_nvme_support(devname, "format", logfile)
+                actual_op = "Hardware Erase + Software Verify (NVMe format)"
+            else:
+                hw_info = check_ata_support(devname, "erase", logfile)
+                actual_op = "Hardware Erase + Software Verify (ATA security-erase)"
             confirm_wipe(devname, devsize, operation, logfile)
-            atasecure(devname, logfile, hdpi)
+            hw_erase(devname, block, blocksize, devsize, logfile, hw_info)
             record.success = True
-    elif args.ataerase:
+            record.operation = actual_op
+            record.wipe_standard = args.standard or _WIPE_STANDARDS.get(actual_op, "")
+    elif args.hw_secure:
         if dry_run:
-            console.print("[yellow]⚠ --dry-run has no effect with --ataerase "
-                "(ATA commands are issued by hdparm, not OWL). Skipping.[/]")
+            console.print("[yellow]⚠ --dry-run has no effect with --hw-secure "
+                "(hardware erase command is not issued by OWL). Skipping.[/]")
         else:
-            hdpi = check_ata_support(devname, "erase", logfile)
+            # Pre-flight before confirmation screen
+            if _is_nvme(devname):
+                # Probe sanitize support; fall back gracefully
+                import json as _json
+                raw = command_line(
+                    ['nvme', 'id-ctrl', devname, '--output-format=json'],
+                    cmdtimeout=10).decode(errors='replace')
+                sanitize_ok = False
+                if raw:
+                    try:
+                        ctrl = _json.loads(raw)
+                        sanitize_ok = (bool(ctrl.get('oacs', 0) & (1 << 3)) and
+                                       bool(ctrl.get('sanicap', 0) & 0b010))
+                    except _json.JSONDecodeError:
+                        pass
+                if sanitize_ok:
+                    hw_info = check_nvme_support(devname, "sanitize", logfile)
+                    actual_op = "Hardware Secure Erase + Software Verify (NVMe sanitize)"
+                else:
+                    console.print("[yellow]⚠ NVMe Block Erase (sanitize) not supported — "
+                        "falling back to NVMe User Data Erase (format --ses=1).[/]")
+                    logging(logfile, "hw-secure: sanitize not supported, "
+                        "falling back to nvme format")
+                    hw_info = check_nvme_support(devname, "format", logfile)
+                    actual_op = "Hardware Secure Erase + Software Verify (NVMe format)"
+            else:
+                hw_info = check_ata_support(devname, "secure", logfile)
+                actual_op = "Hardware Secure Erase (ATA enhanced security-erase)"
             confirm_wipe(devname, devsize, operation, logfile)
-            ataerase(devname, logfile, hdpi)
+            hw_secure(devname, block, blocksize, devsize, logfile, hw_info)
             record.success = True
+            record.operation = actual_op
+            record.wipe_standard = args.standard or _WIPE_STANDARDS.get(actual_op, "")
     else:
         if not dry_run:
             confirm_wipe(devname, devsize, operation, logfile)
         fulltest(block, blocksize, devsize, logfile, dry_run)
         record.success = True
+
+    # Capture SMART data after the wipe
+    if args.report is not None and record.success and not args.check:
+        console.print("[dim]Capturing post-wipe SMART data...[/]")
+        record.smart_post = capture_smart(devname, logfile)
 
     record.end_time = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec='seconds')
 
