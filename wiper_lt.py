@@ -61,7 +61,6 @@ class WipeRecord:
 
     # Operation
     operation: str      = ""
-    dry_run: bool       = False
     command: str        = ""
 
     # Device
@@ -105,10 +104,7 @@ def generate_certificate(record: WipeRecord, report_path: str, logfile):
     size_gib  = record.device_size / 1024 / 1024 / 1024
 
     # --- Status string ---
-    if record.dry_run:
-        status_text  = "DRY RUN — No data written"
-        status_color = colors.orange
-    elif record.success:
+    if record.success:
         status_text  = "COMPLETED SUCCESSFULLY"
         status_color = colors.HexColor("#1a7a1a")
     else:
@@ -364,27 +360,22 @@ def _sigint_handler(sig, frame):
 signal.signal(signal.SIGINT, _sigint_handler)
 
 
-def checkblock(block, blocksize, devsize, logfile, dry_run=False):
+def checkblock(block, blocksize, devsize, logfile):
     '''
     --smart / -s
     Single pass overwriting non-clean sectors with nulls. Not verified.
     Ideal for flash media where we want to limit writes.
-    If dry_run is True, detects dirty sectors but does not overwrite them.
     '''
-    if dry_run:
-        logging(logfile, "DRY RUN: Smart wipe simulation started")
-    else:
-        logging(logfile, "Smart wipe started")
+    logging(logfile, "Smart wipe started")
     nullbytes = bytes(blocksize)
     flushcaches()
     os.lseek(block, 0, os.SEEK_SET)
     starttime = time.time()
     blockwrites = 0
     devpos = 0
-    dry_tag = " [bold yellow][DRY RUN][/]" if dry_run else ""
 
     with Progress(
-        TextColumn(f"[bold cyan]Smart wipe[/]{dry_tag}"),
+        TextColumn("[bold cyan]Smart wipe[/]"),
         BarColumn(bar_width=None),
         TaskProgressColumn(),
         TimeRemainingColumn(),
@@ -405,30 +396,22 @@ def checkblock(block, blocksize, devsize, logfile, dry_run=False):
             mbps = (devpos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
 
             if bytesin != nullbytes:
-                if not dry_run:
-                    devpos = os.lseek(block, -blocksize, os.SEEK_CUR)
-                    os.write(block, nullbytes)
+                devpos = os.lseek(block, -blocksize, os.SEEK_CUR)
+                os.write(block, nullbytes)
                 blockwrites += 1
 
             progress.update(task, completed=devpos + blocksize, mbps=mbps, writes=blockwrites)
 
     console.print("[dim]Syncing...[/]")
-    if not dry_run:
-        os.sync()
+    os.sync()
     flushcaches()
 
     runtime = time.time() - starttime
     runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
     mbps = (devpos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
-    if dry_run:
-        summary = (f"DRY RUN — smart wipe scan: {devpos + blocksize:,} bytes checked, "
-                   f"{blockwrites} dirty blocks found (not overwritten). "
-                   f"~{runtimefmt} @ {mbps:.2f} MB/s")
-        console.print(f"[bold yellow]~[/] {summary}")
-    else:
-        summary = (f"Smart wipe complete. {devpos + blocksize:,} bytes checked. "
-                   f"{blockwrites} blocks rewritten. {runtimefmt} @ {mbps:.2f} MB/s")
-        console.print(f"[bold green]✓[/] {summary}")
+    summary = (f"Smart wipe complete. {devpos + blocksize:,} bytes checked. "
+               f"{blockwrites} blocks rewritten. {runtimefmt} @ {mbps:.2f} MB/s")
+    console.print(f"[bold green]✓[/] {summary}")
     logging(logfile, summary)
     logging(logfile, "Clean. Single pass overwriting non-clear sectors with nulls. Not verified.")
 
@@ -964,17 +947,12 @@ def hw_secure(devname, block, blocksize, devsize, logfile, hw_info=None):
         logging(logfile, "ATA Enhanced Security Erase completed. "
             "Verify pass skipped — erase pattern is vendor-defined, may not be 0x00.")
 
-def writeloop(block, blocksize, devsize, pattern, logfile, dry_run=False):
+def writeloop(block, blocksize, devsize, pattern, logfile):
     '''
     Full disk write pass — writes a single byte pattern across the entire device.
-    If dry_run is True, seeks and reads normally but skips all os.write() calls.
     '''
-    if dry_run:
-        logging(logfile, f"DRY RUN: Would write 0x{pattern} to drive.")
-    else:
-        logging(logfile, f"Writing 0x{pattern} to drive.")
+    logging(logfile, f"Writing 0x{pattern} to drive.")
     color = "red" if pattern == "FF" else "cyan"
-    dry_tag = " [bold yellow][DRY RUN][/]" if dry_run else ""
     if pattern == "00":
         writepattern = bytes(blocksize)
     else:
@@ -983,7 +961,7 @@ def writeloop(block, blocksize, devsize, pattern, logfile, dry_run=False):
     starttime = time.time()
 
     with Progress(
-        TextColumn(f"[bold {color}]Write 0x{pattern}[/]{dry_tag}"),
+        TextColumn(f"[bold {color}]Write 0x{pattern}[/]"),
         BarColumn(bar_width=None),
         TaskProgressColumn(),
         TimeRemainingColumn(),
@@ -999,18 +977,14 @@ def writeloop(block, blocksize, devsize, pattern, logfile, dry_run=False):
                     writepattern = bytes(blocksize)
                 else:
                     writepattern = bytes(blocksize).replace(b'\x00', b'\xff')
-            if not dry_run:
-                try:
-                    os.write(block, writepattern)
-                except OSError as exc:
-                    msg = f"I/O write error at position {dev_pos}: {exc}"
-                    console.print(f"[bold red]✗ {msg}[/]")
-                    logging(logfile, msg)
-                    logging(logfile, "Exiting due to I/O error.")
-                    sys.exit(1)
-            else:
-                # simulate the time cost of a seek without writing
-                os.lseek(block, dev_pos + blocksize, os.SEEK_SET)
+            try:
+                os.write(block, writepattern)
+            except OSError as exc:
+                msg = f"I/O write error at position {dev_pos}: {exc}"
+                console.print(f"[bold red]✗ {msg}[/]")
+                logging(logfile, msg)
+                logging(logfile, "Exiting due to I/O error.")
+                sys.exit(1)
             runtime = time.time() - starttime
             mbps = (dev_pos + blocksize) / runtime / 1024 / 1024 if runtime > 0 else 0.0
             progress.update(task, completed=dev_pos + blocksize, mbps=mbps)
@@ -1018,12 +992,8 @@ def writeloop(block, blocksize, devsize, pattern, logfile, dry_run=False):
     runtime = time.time() - starttime
     mbps = devsize / runtime / 1024 / 1024 if runtime > 0 else 0.0
     runtimefmt = str(datetime.timedelta(seconds=math.floor(runtime)))
-    if dry_run:
-        summary = f"DRY RUN — would write 0x{pattern}: {devsize:,} bytes in ~{runtimefmt} @ {mbps:.2f} MB/s"
-        console.print(f"[bold yellow]~[/] {summary}")
-    else:
-        summary = f"Wrote 0x{pattern}: {devsize:,} bytes in {runtimefmt} @ {mbps:.2f} MB/s"
-        console.print(f"[bold green]✓[/] {summary}")
+    summary = f"Wrote 0x{pattern}: {devsize:,} bytes in {runtimefmt} @ {mbps:.2f} MB/s"
+    console.print(f"[bold green]✓[/] {summary}")
     logging(logfile, summary)
 
 def readloop(block, blocksize, devsize, pattern, logfile):
@@ -1078,42 +1048,39 @@ def readloop(block, blocksize, devsize, pattern, logfile):
 
 
 
-def fulltest(block, blocksize, devsize, logfile, dry_run=False):
+def fulltest(block, blocksize, devsize, logfile):
     '''
     --full / -f - check all bits flip both ways and verify
     '''
     logging(logfile, "Full drive double-wipe and verify started")
 
-    writeloop(block, blocksize, devsize, "FF", logfile, dry_run)
+    writeloop(block, blocksize, devsize, "FF", logfile)
     console.print("[dim]Syncing...[/]")
-    if not dry_run:
-        os.sync()
+    os.sync()
     flushcaches()
 
     readloop(block, blocksize, devsize, "FF", logfile)
 
-    writeloop(block, blocksize, devsize, "00", logfile, dry_run)
+    writeloop(block, blocksize, devsize, "00", logfile)
 
     console.print("[dim]Syncing...[/]")
-    if not dry_run:
-        os.sync()
+    os.sync()
     flushcaches()
 
     readloop(block, blocksize, devsize, "00", logfile)
 
     logging(logfile, "Double wipe and verify completed.")
 
-def singlepass(block, blocksize, devsize, logfile, dry_run=False):
+def singlepass(block, blocksize, devsize, logfile):
     '''
     --zero / -z - write a null to every sector and then verify
     '''
     logging(logfile, "Single-pass null and verify started")
 
-    writeloop(block, blocksize, devsize, "00", logfile, dry_run)
+    writeloop(block, blocksize, devsize, "00", logfile)
 
     console.print("[dim]Syncing...[/]")
-    if not dry_run:
-        os.sync()
+    os.sync()
     flushcaches()
 
     readloop(block, blocksize, devsize, "00", logfile)
@@ -1436,8 +1403,6 @@ def parse_arguments():
              "verify pass. ATA enhanced security-erase skips software verify "
              "as the erase pattern is vendor-defined and may not be 0x00.",
         action="store_true", dest="hw_secure")
-    parser.add_argument("--dry-run", help="Simulate wipe without writing any data",
-        action="store_true", dest="dry_run")
     parser.add_argument("--list", help="List available block devices and exit",
         action="store_true")
     parser.add_argument("--report", help="Write a wipe certificate to this file path "
@@ -1446,13 +1411,6 @@ def parse_arguments():
     parser.add_argument("--operator", help="Name of the operator performing the wipe "
         "(recorded in the certificate, requires --report)",
         metavar="NAME", default=None)
-    parser.add_argument("--standard",
-        help="Optional override for the wipe standard cited on the certificate. "
-            "A standard is automatically assigned based on the operation used "
-            "(e.g. NIST SP 800-88 Rev. 1 Clear/Purge). Use this only when you "
-            "need to cite a different standard "
-            "(e.g. 'DoD 5220.22-M'). Requires --report.",
-        metavar="STANDARD", default=None)
 
     return parser.parse_args()
 
@@ -1527,20 +1485,19 @@ def mountcheck(blkdata, logfile, mountct):
             mountct += 1
     return mountct
 
-# Maps each operation label to its NIST SP 800-88 Rev. 1 standard.
-# Used to auto-populate the certificate wipe_standard field.
-# --standard on the command line overrides these.
+# Maps each operation label to its NIST SP 800-88r2 standard classification.
+# Auto-populated on the certificate for every operation.
 _WIPE_STANDARDS = {
-    "Full Double Wipe + Verify (FF then 00)":                     "Two-pass overwrite (0xFF / 0x00) with verification — meets NIST SP 800-88 Rev. 1 Clear; designed for stuck-bit detection",
-    "Full Double Wipe + Verify (FF then 00) [default]":           "Two-pass overwrite (0xFF / 0x00) with verification — meets NIST SP 800-88 Rev. 1 Clear; designed for stuck-bit detection",
-    "Single-Pass Zero + Verify":                                  "NIST SP 800-88 Rev. 1 — Clear",
+    "Full Double Wipe + Verify (FF then 00)":                     "Two-pass overwrite (0xFF / 0x00) with verification — meets NIST SP 800-88r2 Clear; designed for stuck-bit detection",
+    "Full Double Wipe + Verify (FF then 00) [default]":           "Two-pass overwrite (0xFF / 0x00) with verification — meets NIST SP 800-88r2 Clear; designed for stuck-bit detection",
+    "Single-Pass Zero + Verify":                                  "NIST SP 800-88r2 — Clear",
     "Smart Wipe (selective null overwrite)":                      "Non-standard (partial overwrite, selective sectors only)",
     "Drive Map / Null Check (read-only)":                         "N/A — read-only operation",
-    "Hardware Erase + Software Verify (NVMe format)":             "NIST SP 800-88 Rev. 1 — Clear",
-    "Hardware Erase + Software Verify (ATA security-erase)":      "NIST SP 800-88 Rev. 1 — Clear",
-    "Hardware Secure Erase + Software Verify (NVMe sanitize)":    "NIST SP 800-88 Rev. 1 — Purge",
-    "Hardware Secure Erase + Software Verify (NVMe format)":      "NIST SP 800-88 Rev. 1 — Clear",
-    "Hardware Secure Erase (ATA enhanced security-erase)":        "NIST SP 800-88 Rev. 1 — Purge",
+    "Hardware Erase + Software Verify (NVMe format)":             "NIST SP 800-88r2 — Clear",
+    "Hardware Erase + Software Verify (ATA security-erase)":      "NIST SP 800-88r2 — Clear",
+    "Hardware Secure Erase + Software Verify (NVMe sanitize)":    "NIST SP 800-88r2 — Purge",
+    "Hardware Secure Erase + Software Verify (NVMe format)":      "NIST SP 800-88r2 — Clear",
+    "Hardware Secure Erase (ATA enhanced security-erase)":        "NIST SP 800-88r2 — Purge",
 }
 
 
@@ -1569,7 +1526,6 @@ def main():
         sys.exit(1)
 
     logfile = args.logfile  # None if not provided by user
-    dry_run = args.dry_run
 
     # Determine operation label early for the record
     if args.check:
@@ -1587,13 +1543,11 @@ def main():
     else:
         operation = "Full Double Wipe + Verify (FF then 00) [default]"
 
-    # Auto-assign the wipe standard from the map; --standard overrides
-    auto_standard = _WIPE_STANDARDS.get(operation, "")
-    wipe_standard = args.standard or auto_standard
+    # Auto-assign the wipe standard from the map
+    wipe_standard = _WIPE_STANDARDS.get(operation, "")
 
     record = WipeRecord(
         operation=operation,
-        dry_run=dry_run,
         command=' '.join(sys.argv),
         device_path=devname,
         operator_name=args.operator or "",
@@ -1604,17 +1558,12 @@ def main():
         console.print("[yellow]⚠ --operator was specified but --report was not. "
             "The operator name will not be saved unless --report is also used.[/]")
 
-    if args.standard and args.report is None:
-        console.print("[yellow]⚠ --standard was specified but --report was not. "
-            "The wipe standard will not be saved unless --report is also used.[/]")
-
     atexit.register(cleanup)
     rootcheck()
 
-    # In dry-run mode open read-only — we will never write to the device
-    open_flags = os.O_RDONLY if dry_run else os.O_RDWR | os.O_SYNC
+    # Direct access to disk to bypass cache, sync writes
     try:
-        block = os.open(devname, open_flags)
+        block = os.open(devname, os.O_RDWR | os.O_SYNC)
     except PermissionError:
         console.print(f"[bold red]ERROR: Permission denied opening {devname}. "
             "Are you running as root?[/]")
@@ -1644,15 +1593,6 @@ def main():
 
     prettyheader(devname, devsize, blocksize, logfile)
 
-    if dry_run:
-        console.print(Panel(
-            "[bold yellow]DRY RUN MODE[/] — Device will be read but [bold]never written to.[/]\n"
-            "Progress bars show estimated timing. Verification passes use real reads.",
-            border_style="yellow", padding=(0, 2)
-        ))
-        console.print()
-        logging(logfile, "DRY RUN mode active — no writes will occur.")
-
     blkdata = diskinfo(devname, logfile)
     if blkdata:
         record.model     = str(blkdata.get('model',  '') or '—').strip()
@@ -1671,79 +1611,67 @@ def main():
         record.success = True
         record.notes   = "Read-only check. No data was written."
     elif args.smart:
-        if not dry_run:
-            confirm_wipe(devname, devsize, operation, logfile)
-        checkblock(block, blocksize, devsize, logfile, dry_run)
+        confirm_wipe(devname, devsize, operation, logfile)
+        checkblock(block, blocksize, devsize, logfile)
         record.success = True
     elif args.zero:
-        if not dry_run:
-            confirm_wipe(devname, devsize, operation, logfile)
-        singlepass(block, blocksize, devsize, logfile, dry_run)
+        confirm_wipe(devname, devsize, operation, logfile)
+        singlepass(block, blocksize, devsize, logfile)
         record.success = True
     elif args.full:
-        if not dry_run:
-            confirm_wipe(devname, devsize, operation, logfile)
-        fulltest(block, blocksize, devsize, logfile, dry_run)
+        confirm_wipe(devname, devsize, operation, logfile)
+        fulltest(block, blocksize, devsize, logfile)
         record.success = True
     elif args.hw_erase:
-        if dry_run:
-            console.print("[yellow]⚠ --dry-run has no effect with --hw-erase "
-                "(hardware erase command is not issued by OWL). Skipping.[/]")
+        # Pre-flight before confirmation screen
+        if _is_nvme(devname):
+            hw_info = check_nvme_support(devname, "format", logfile)
+            actual_op = "Hardware Erase + Software Verify (NVMe format)"
         else:
-            # Pre-flight before confirmation screen
-            if _is_nvme(devname):
-                hw_info = check_nvme_support(devname, "format", logfile)
-                actual_op = "Hardware Erase + Software Verify (NVMe format)"
-            else:
-                hw_info = check_ata_support(devname, "erase", logfile)
-                actual_op = "Hardware Erase + Software Verify (ATA security-erase)"
-            confirm_wipe(devname, devsize, operation, logfile)
-            hw_erase(devname, block, blocksize, devsize, logfile, hw_info)
-            record.success = True
-            record.operation = actual_op
-            record.wipe_standard = args.standard or _WIPE_STANDARDS.get(actual_op, "")
+            hw_info = check_ata_support(devname, "erase", logfile)
+            actual_op = "Hardware Erase + Software Verify (ATA security-erase)"
+        confirm_wipe(devname, devsize, operation, logfile)
+        hw_erase(devname, block, blocksize, devsize, logfile, hw_info)
+        record.success = True
+        record.operation = actual_op
+        record.wipe_standard = _WIPE_STANDARDS.get(actual_op, "")
     elif args.hw_secure:
-        if dry_run:
-            console.print("[yellow]⚠ --dry-run has no effect with --hw-secure "
-                "(hardware erase command is not issued by OWL). Skipping.[/]")
-        else:
-            # Pre-flight before confirmation screen
-            if _is_nvme(devname):
-                # Probe sanitize support; fall back gracefully
-                import json as _json
-                raw = command_line(
-                    ['nvme', 'id-ctrl', devname, '--output-format=json'],
-                    cmdtimeout=10).decode(errors='replace')
-                sanitize_ok = False
-                if raw:
-                    try:
-                        ctrl = _json.loads(raw)
-                        sanitize_ok = (bool(ctrl.get('oacs', 0) & (1 << 3)) and
-                                       bool(ctrl.get('sanicap', 0) & 0b010))
-                    except _json.JSONDecodeError:
-                        pass
-                if sanitize_ok:
-                    hw_info = check_nvme_support(devname, "sanitize", logfile)
-                    actual_op = "Hardware Secure Erase + Software Verify (NVMe sanitize)"
-                else:
-                    console.print("[yellow]⚠ NVMe Block Erase (sanitize) not supported — "
-                        "falling back to NVMe User Data Erase (format --ses=1).[/]")
-                    logging(logfile, "hw-secure: sanitize not supported, "
-                        "falling back to nvme format")
-                    hw_info = check_nvme_support(devname, "format", logfile)
-                    actual_op = "Hardware Secure Erase + Software Verify (NVMe format)"
+        # Pre-flight before confirmation screen
+        if _is_nvme(devname):
+            # Probe sanitize support; fall back gracefully
+            import json as _json
+            raw = command_line(
+                ['nvme', 'id-ctrl', devname, '--output-format=json'],
+                cmdtimeout=10).decode(errors='replace')
+            sanitize_ok = False
+            if raw:
+                try:
+                    ctrl = _json.loads(raw)
+                    sanitize_ok = (bool(ctrl.get('oacs', 0) & (1 << 3)) and
+                                   bool(ctrl.get('sanicap', 0) & 0b010))
+                except _json.JSONDecodeError:
+                    pass
+            if sanitize_ok:
+                hw_info = check_nvme_support(devname, "sanitize", logfile)
+                actual_op = "Hardware Secure Erase + Software Verify (NVMe sanitize)"
             else:
-                hw_info = check_ata_support(devname, "secure", logfile)
-                actual_op = "Hardware Secure Erase (ATA enhanced security-erase)"
-            confirm_wipe(devname, devsize, operation, logfile)
-            hw_secure(devname, block, blocksize, devsize, logfile, hw_info)
-            record.success = True
-            record.operation = actual_op
-            record.wipe_standard = args.standard or _WIPE_STANDARDS.get(actual_op, "")
+                console.print("[yellow]⚠ NVMe Block Erase (sanitize) not supported — "
+                    "falling back to NVMe User Data Erase (format --ses=1).[/]")
+                logging(logfile, "hw-secure: sanitize not supported, "
+                    "falling back to nvme format")
+                hw_info = check_nvme_support(devname, "format", logfile)
+                actual_op = "Hardware Secure Erase + Software Verify (NVMe format)"
+        else:
+            hw_info = check_ata_support(devname, "secure", logfile)
+            actual_op = "Hardware Secure Erase (ATA enhanced security-erase)"
+        confirm_wipe(devname, devsize, operation, logfile)
+        hw_secure(devname, block, blocksize, devsize, logfile, hw_info)
+        record.success = True
+        record.operation = actual_op
+        record.wipe_standard = _WIPE_STANDARDS.get(actual_op, "")
     else:
-        if not dry_run:
-            confirm_wipe(devname, devsize, operation, logfile)
-        fulltest(block, blocksize, devsize, logfile, dry_run)
+        confirm_wipe(devname, devsize, operation, logfile)
+        fulltest(block, blocksize, devsize, logfile)
         record.success = True
 
     # Capture SMART data after the wipe
