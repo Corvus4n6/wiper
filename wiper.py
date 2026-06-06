@@ -6,7 +6,7 @@
   ( o o )   Optimized
 //'` ' `'\\ Wipe &
 ||'''''''|| Logging
-||\\---//|| LightweighT version
+||\\---//||
     """
 OWL - Optimized Wiping and Logging
 forensic drive wiper program by Corvus Forensics LLC
@@ -1116,7 +1116,7 @@ def prettyheader(devname, devsize, blocksize, logfile):
     owl.append("  ( o o )\n", style="bold yellow")
     owl.append(" /'` ' `'\\\n", style="bold yellow")
     owl.append(" |'''''''|\n", style="bold yellow")
-    owl.append(" |\\'''//|\n\n", style="bold yellow")
+    owl.append(" |\\\\'''//|\n\n", style="bold yellow")
     owl.append("O.W.L.", style="bold white")
     owl.append(" — Optimized Wipe and Logging\n", style="white")
     owl.append("Forensic Media Sterilization Utility", style="dim")
